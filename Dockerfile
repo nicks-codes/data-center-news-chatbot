@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 # Copy application code
 COPY backend/ ./backend/
-COPY frontend/ ./frontend/ 2>/dev/null || true
+COPY frontend/ ./frontend/
 
 # Create necessary directories
 RUN mkdir -p /app/data /app/chroma_db
