@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import re
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,71 @@ class BaseScraper(ABC):
         # Remove null bytes and other control characters
         text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
         return text.strip()
+
+    def canonicalize_url(self, url: str) -> str:
+        """
+        Normalize URLs to improve deduplication and reduce tracking noise.
+        - Removes fragments
+        - Strips common tracking query params (utm_*, gclid, fbclid, etc.)
+        - Normalizes scheme/host casing
+        - Attempts to unwrap some Google News redirect URLs when possible
+        """
+        if not url:
+            return ""
+        url = url.strip()
+        if not url:
+            return ""
+
+        # Some feeds include escaped URLs; unquote is safe here because we re-encode query params below.
+        try:
+            url = unquote(url)
+        except Exception:
+            pass
+
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return url
+
+        scheme = (parsed.scheme or "https").lower()
+        netloc = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+
+        # Best-effort unwrapping of Google News RSS redirect links when the target URL is present as a query param.
+        # Example patterns: ...?url=https%3A%2F%2Fexample.com%2F... or ...?u=https%3A%2F%2Fexample.com%2F...
+        if netloc.endswith("news.google.com"):
+            try:
+                q = dict(parse_qsl(parsed.query, keep_blank_values=True))
+                target = q.get("url") or q.get("u")
+                if target and target.startswith(("http://", "https://")):
+                    return self.canonicalize_url(target)
+            except Exception:
+                pass
+
+        # Strip tracking params
+        tracking_keys = {
+            "gclid", "fbclid", "yclid", "mc_cid", "mc_eid", "cmpid",
+            "ref", "ref_src", "source", "src", "spm",
+        }
+        try:
+            qsl = parse_qsl(parsed.query, keep_blank_values=True)
+            filtered = []
+            for k, v in qsl:
+                lk = (k or "").lower()
+                if lk.startswith("utm_"):
+                    continue
+                if lk in tracking_keys:
+                    continue
+                filtered.append((k, v))
+            query = urlencode(filtered, doseq=True)
+        except Exception:
+            query = parsed.query
+
+        cleaned = urlunparse((scheme, netloc, path, parsed.params, query, ""))  # drop fragment
+        # Normalize a few simple path edge-cases
+        if cleaned.endswith("/") and len(cleaned) > len(f"{scheme}://{netloc}/"):
+            cleaned = cleaned.rstrip("/")
+        return cleaned
     
     def parse_date(self, date_input) -> Optional[datetime]:
         """Parse date from various formats"""
@@ -221,7 +287,7 @@ class BaseScraper(ABC):
         try:
             title = self.clean_text(raw_article.get('title', ''))
             content = self.clean_text(raw_article.get('content', ''))
-            url = raw_article.get('url', '').strip()
+            url = self.canonicalize_url(raw_article.get('url', ''))
             
             # Validate required fields
             if not title or not url:
