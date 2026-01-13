@@ -16,93 +16,88 @@ RSS_FEEDS = [
     # Primary Data Center News Sources
     {
         'name': 'Data Center Dynamics',
-        'url': 'https://www.datacenterdynamics.com/en/feed/',
+        'url': 'https://www.datacenterdynamics.com/en/rss/',
         'priority': 1,
+        'max_entries': 60,
     },
     {
         'name': 'Data Center Knowledge',
         'url': 'https://www.datacenterknowledge.com/rss.xml',
         'priority': 1,
+        'max_entries': 60,
     },
     {
         'name': 'Data Center Frontier',
-        'url': 'https://www.datacenterfrontier.com/feed/',
+        # Official RSS link is embedded on the homepage (Cloudflare blocks /feed/)
+        'url': 'https://www.datacenterfrontier.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D',
         'priority': 1,
+        'max_entries': 60,
     },
     {
         'name': 'Data Center POST',
         'url': 'https://www.datacenterpost.com/feed/',
         'priority': 1,
+        'max_entries': 60,
+    },
+    {
+        # Baxtel maintains a large news stream; RSS is the most complete way to ingest it
+        'name': 'Baxtel News',
+        'url': 'https://baxtel.com/news.rss',
+        'priority': 1,
+        'max_entries': 200,
     },
     # Industry Publications
     {
         'name': 'The Register - Data Centre',
         'url': 'https://www.theregister.com/data_centre/headlines.atom',
         'priority': 2,
-    },
-    {
-        'name': 'TechTarget SearchDataCenter',
-        'url': 'https://www.techtarget.com/searchdatacenter/rss',
-        'priority': 2,
-    },
-    {
-        'name': 'Network World - Data Center',
-        'url': 'https://www.networkworld.com/category/data-center/feed/',
-        'priority': 2,
-    },
-    {
-        'name': 'SDxCentral - Data Center',
-        'url': 'https://www.sdxcentral.com/data-center/feed/',
-        'priority': 2,
+        'max_entries': 80,
     },
     # Cloud & Infrastructure News (often covers data centers)
     {
         'name': 'Ars Technica - IT',
         'url': 'https://feeds.arstechnica.com/arstechnica/technology-lab',
         'priority': 3,
+        'max_entries': 50,
     },
     {
         'name': 'ZDNet - Data Management',
         'url': 'https://www.zdnet.com/topic/data-management/rss.xml',
         'priority': 3,
+        'max_entries': 50,
     },
     {
         'name': 'InfoWorld',
-        'url': 'https://www.infoworld.com/index.rss',
+        'url': 'https://www.infoworld.com/feed/',
         'priority': 3,
+        'max_entries': 50,
     },
     {
         'name': 'The Next Platform',
         'url': 'https://www.nextplatform.com/feed/',
         'priority': 2,
+        'max_entries': 50,
     },
     {
         'name': 'Inside HPC',
         'url': 'https://insidehpc.com/feed/',
         'priority': 2,
-    },
-    # Business & Investment News (data center deals, expansions)
-    {
-        'name': 'Reuters Technology',
-        'url': 'https://www.reutersagency.com/feed/?taxonomy=best-topics&post_type=best&best-topics=tech',
-        'priority': 3,
+        'max_entries': 50,
     },
     # Sustainability & Energy (important for DCs)
     {
-        'name': 'GreenBiz',
-        'url': 'https://www.greenbiz.com/feed',
+        # GreenBiz now redirects feeds via Trellis
+        'name': 'Trellis (GreenBiz) - Sustainability',
+        'url': 'https://trellis.net/feed/',
         'priority': 3,
+        'max_entries': 50,
     },
     # Vendor/Company Blogs (useful for product news)
     {
         'name': 'Equinix Blog',
         'url': 'https://blog.equinix.com/feed/',
         'priority': 2,
-    },
-    {
-        'name': 'Uptime Institute',
-        'url': 'https://uptimeinstitute.com/feed',
-        'priority': 1,
+        'max_entries': 50,
     },
 ]
 
@@ -122,11 +117,28 @@ class RSSScraper(BaseScraper):
     def get_source_type(self) -> str:
         return "rss"
     
-    def fetch_feed_content(self, feed_url: str) -> str:
+    def fetch_feed_content(self, feed_url: str):
         """Fetch feed content with retry logic"""
         for attempt in range(self.max_retries):
             try:
-                response = requests.get(feed_url, headers=self.headers, timeout=self.timeout)
+                response = requests.get(
+                    feed_url,
+                    headers=self.headers,
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                )
+                
+                # Don't retry permanent failures
+                if response.status_code == 404:
+                    self.logger.warning(f"Feed not found (404): {feed_url}")
+                    return None
+                if response.status_code in (401, 403):
+                    self.logger.warning(f"Feed access denied ({response.status_code}): {feed_url}")
+                    return None
+                if response.status_code == 429:
+                    self.logger.warning(f"Rate limited (429): {feed_url}")
+                    return None
+                
                 response.raise_for_status()
                 return response.text
             except requests.exceptions.Timeout:
@@ -160,13 +172,27 @@ class RSSScraper(BaseScraper):
                 feed = feedparser.parse(content)
             else:
                 # Fallback to feedparser's built-in fetching
-                feed = feedparser.parse(feed_url)
+                try:
+                    feed = feedparser.parse(feed_url, request_headers=self.headers)
+                except TypeError:
+                    feed = feedparser.parse(feed_url)
             
             if feed.bozo and feed.bozo_exception:
                 # Don't fail completely on parse warnings, just log them
                 self.logger.debug(f"Feed parsing warning for {feed_name}: {feed.bozo_exception}")
             
-            for entry in feed.entries:
+            # Respect max_entries if configured on the feed config
+            max_entries = None
+            for f in self.feeds:
+                if f.get('name') == feed_name and f.get('url') == feed_url:
+                    max_entries = f.get('max_entries')
+                    break
+            
+            entries = feed.entries
+            if isinstance(max_entries, int) and max_entries > 0:
+                entries = entries[:max_entries]
+            
+            for entry in entries:
                 try:
                     # Parse published date with multiple format support
                     published_date = None

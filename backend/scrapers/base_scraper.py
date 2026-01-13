@@ -229,10 +229,22 @@ class BaseScraper(ABC):
             # Parse published date
             published_date = self.parse_date(raw_article.get('published_date'))
             
-            # Skip very old articles (older than 30 days)
-            if published_date:
+            # Skip very old articles (configurable)
+            #
+            # MAX_ARTICLE_AGE_DAYS:
+            # - default: 30
+            # - set to 0 to disable age filtering
+            max_age_days = 30
+            try:
+                max_age_days = int(os.getenv("MAX_ARTICLE_AGE_DAYS", "30"))
+            except ValueError:
+                max_age_days = 30
+            if max_age_days < 0:
+                max_age_days = 30
+            
+            if published_date and max_age_days > 0:
                 age = datetime.now() - published_date
-                if age > timedelta(days=30):
+                if age > timedelta(days=max_age_days):
                     self.logger.debug(f"Skipping old article: {title[:50]}...")
                     return None
             
