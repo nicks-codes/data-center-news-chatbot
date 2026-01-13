@@ -1,11 +1,13 @@
 """
 RSS feed scraper for data center news sites
 """
+import concurrent.futures
 import feedparser
-from typing import List, Dict
+from typing import List, Dict, Optional
 from datetime import datetime
 import logging
 from .base_scraper import BaseScraper
+from ..utils.web_utils import WebUtils
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +45,59 @@ class RSSScraper(BaseScraper):
     def __init__(self):
         super().__init__("RSS Feed")
         self.feeds = RSS_FEEDS
+        self.web_utils = WebUtils()
     
     def get_source_type(self) -> str:
         return "rss"
     
+    def fetch_full_content(self, url: str) -> Optional[str]:
+        """Fetch full content of an article"""
+        article_data = self.web_utils.extract_article(url)
+        if article_data and article_data.get('content'):
+            return article_data['content']
+        return None
+
+    def process_entry(self, entry, feed_name: str) -> Optional[Dict]:
+        """Process a single RSS entry"""
+        try:
+            # Parse published date
+            published_date = None
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                published_date = datetime(*entry.published_parsed[:6])
+            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                published_date = datetime(*entry.updated_parsed[:6])
+            
+            # Get content
+            content = ""
+            if hasattr(entry, 'content'):
+                content = entry.content[0].value if entry.content else ""
+            elif hasattr(entry, 'summary'):
+                content = entry.summary
+            elif hasattr(entry, 'description'):
+                content = entry.description
+            
+            # If content is short, try to fetch full article
+            if len(content) < 500 and hasattr(entry, 'link'):
+                full_content = self.fetch_full_content(entry.link)
+                if full_content:
+                    content = full_content
+            
+            # Skip if still no content
+            if not content:
+                return None
+
+            return {
+                'title': entry.title,
+                'content': content,
+                'url': entry.link,
+                'published_date': published_date,
+                'author': entry.get('author', ''),
+                'source': feed_name,
+            }
+        except Exception as e:
+            self.logger.error(f"Error parsing entry from {feed_name}: {e}")
+            return None
+
     def parse_feed(self, feed_url: str, feed_name: str) -> List[Dict]:
         """Parse a single RSS feed"""
         articles = []
@@ -55,38 +106,18 @@ class RSSScraper(BaseScraper):
             
             if feed.bozo and feed.bozo_exception:
                 self.logger.warning(f"Feed parsing error for {feed_name}: {feed.bozo_exception}")
-                return articles
+                # Don't return empty list immediately, try to process what we have if any
             
-            for entry in feed.entries:
-                try:
-                    # Parse published date
-                    published_date = None
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        published_date = datetime(*entry.published_parsed[:6])
-                    elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                        published_date = datetime(*entry.updated_parsed[:6])
-                    
-                    # Get content
-                    content = ""
-                    if hasattr(entry, 'content'):
-                        content = entry.content[0].value if entry.content else ""
-                    elif hasattr(entry, 'summary'):
-                        content = entry.summary
-                    elif hasattr(entry, 'description'):
-                        content = entry.description
-                    
-                    article = {
-                        'title': entry.title,
-                        'content': content,
-                        'url': entry.link,
-                        'published_date': published_date,
-                        'author': entry.get('author', ''),
-                        'source': feed_name,
-                    }
-                    articles.append(article)
-                except Exception as e:
-                    self.logger.error(f"Error parsing entry from {feed_name}: {e}")
-                    continue
+            # Process entries in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = []
+                for entry in feed.entries[:20]: # Limit to 20 recent items
+                    futures.append(executor.submit(self.process_entry, entry, feed_name))
+                
+                for future in concurrent.futures.as_completed(futures):
+                    result = future.result()
+                    if result:
+                        articles.append(result)
                     
         except Exception as e:
             self.logger.error(f"Error parsing feed {feed_url}: {e}")

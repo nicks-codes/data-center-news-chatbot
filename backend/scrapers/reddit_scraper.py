@@ -8,6 +8,7 @@ import logging
 import os
 from dotenv import load_dotenv
 from .base_scraper import BaseScraper
+from ..utils.web_utils import WebUtils
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ class RedditScraper(BaseScraper):
         super().__init__("Reddit")
         self.reddit = None
         self._init_reddit()
+        self.web_utils = WebUtils()
     
     def _init_reddit(self):
         """Initialize Reddit API client"""
@@ -57,12 +59,29 @@ class RedditScraper(BaseScraper):
             
             for submission in subreddit.hot(limit=limit):
                 try:
-                    # Skip stickied posts and non-text posts
+                    # Skip stickied posts
                     if submission.stickied:
                         continue
                     
-                    # Get content
-                    content = submission.selftext if hasattr(submission, 'selftext') else ""
+                    content = ""
+                    external_url = None
+                    
+                    if submission.is_self:
+                        # Text post
+                        content = submission.selftext if hasattr(submission, 'selftext') else ""
+                    else:
+                        # Link post
+                        external_url = submission.url
+                        # Try to fetch content from external URL
+                        if external_url and not any(d in external_url for d in ['reddit.com', 'redd.it']):
+                            try:
+                                article_data = self.web_utils.extract_article(external_url)
+                                if article_data and article_data.get('content'):
+                                    content = article_data['content']
+                                    # Use external title if available and better? No, keep reddit title as main
+                            except Exception as e:
+                                self.logger.error(f"Error extracting content from {external_url}: {e}")
+                    
                     if not content and submission.title:
                         content = submission.title
                     
@@ -76,7 +95,7 @@ class RedditScraper(BaseScraper):
                         'published_date': published_date,
                         'author': str(submission.author) if submission.author else '',
                         'source': f"r/{subreddit_name}",
-                        'tags': ', '.join([f"r/{subreddit_name}", "reddit"]) if content else None,
+                        'tags': ', '.join([f"r/{subreddit_name}", "reddit"]),
                     }
                     articles.append(article)
                 except Exception as e:

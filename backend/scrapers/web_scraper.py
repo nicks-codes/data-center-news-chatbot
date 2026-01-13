@@ -1,14 +1,14 @@
 """
 Web scraper for sites without RSS feeds
 """
-import requests
-from bs4 import BeautifulSoup
-from typing import List, Dict, Optional
-from datetime import datetime
-import logging
-import re
+import concurrent.futures
 from urllib.parse import urljoin, urlparse
+from typing import List, Dict, Optional
+import logging
+from bs4 import BeautifulSoup
+
 from .base_scraper import BaseScraper
+from ..utils.web_utils import WebUtils
 
 logger = logging.getLogger(__name__)
 
@@ -52,100 +52,23 @@ class WebScraper(BaseScraper):
     def __init__(self):
         super().__init__("Web Scraper")
         self.sources = WEB_SOURCES
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        self.web_utils = WebUtils()
     
     def get_source_type(self) -> str:
         return "web"
     
-    def extract_text(self, soup: BeautifulSoup) -> str:
-        """Extract main text content from a page"""
-        # Remove script and style elements
-        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            script.decompose()
-        
-        # Try to find main content area
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile('content|article|post', re.I))
-        
-        if main_content:
-            text = main_content.get_text(separator=' ', strip=True)
-        else:
-            text = soup.get_text(separator=' ', strip=True)
-        
-        # Clean up whitespace
-        text = re.sub(r'\s+', ' ', text)
-        return text[:5000]  # Limit content length
-    
-    def extract_date(self, soup: BeautifulSoup) -> Optional[datetime]:
-        """Extract published date from page"""
-        # Try various date selectors
-        date_selectors = [
-            {'tag': 'time', 'attr': 'datetime'},
-            {'tag': 'meta', 'attr': 'property', 'value': 'article:published_time'},
-            {'tag': 'meta', 'attr': 'name', 'value': 'publish-date'},
-            {'tag': 'meta', 'attr': 'name', 'value': 'date'},
-        ]
-        
-        for selector in date_selectors:
-            if selector['tag'] == 'time':
-                time_tag = soup.find('time')
-                if time_tag and selector['attr'] in time_tag.attrs:
-                    try:
-                        return datetime.fromisoformat(time_tag[selector['attr']].replace('Z', '+00:00'))
-                    except:
-                        pass
-            elif selector['tag'] == 'meta':
-                meta = soup.find('meta', {selector['attr']: selector.get('value', '')})
-                if meta and 'content' in meta.attrs:
-                    try:
-                        return datetime.fromisoformat(meta['content'].replace('Z', '+00:00'))
-                    except:
-                        pass
-        
-        return None
-    
     def scrape_article(self, url: str, source_name: str) -> Optional[Dict]:
-        """Scrape a single article page"""
+        """Scrape a single article page using WebUtils"""
         try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
+            article_data = self.web_utils.extract_article(url)
             
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Extract title
-            title = ""
-            if soup.title:
-                title = soup.title.string.strip()
-            else:
-                h1 = soup.find('h1')
-                if h1:
-                    title = h1.get_text(strip=True)
-            
-            # Extract content
-            content = self.extract_text(soup)
-            
-            # Extract date
-            published_date = self.extract_date(soup)
-            
-            # Extract author
-            author = ""
-            author_tag = soup.find('meta', {'name': 'author'}) or soup.find('span', class_=re.compile('author', re.I))
-            if author_tag:
-                if hasattr(author_tag, 'get'):
-                    author = author_tag.get('content', '') or author_tag.get_text(strip=True)
-            
-            if not title or not content:
+            if not article_data:
                 return None
             
-            return {
-                'title': title,
-                'content': content,
-                'url': url,
-                'published_date': published_date,
-                'author': author,
-                'source': source_name,
-            }
+            # Add source name if not present
+            article_data['source'] = source_name
+            
+            return article_data
         except Exception as e:
             self.logger.error(f"Error scraping article {url}: {e}")
             return None
@@ -154,10 +77,11 @@ class WebScraper(BaseScraper):
         """Find article links on a listing page"""
         article_links = []
         try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
+            html = self.web_utils.fetch_url(url)
+            if not html:
+                return []
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            soup = BeautifulSoup(html, 'html.parser')
             
             # Find links that look like articles
             links = soup.find_all('a', href=True)
@@ -165,40 +89,71 @@ class WebScraper(BaseScraper):
                 href = link.get('href', '')
                 text = link.get_text(strip=True)
                 
+                # Check for Substack style links (/p/)
+                if '/p/' in href:
+                     full_url = urljoin(url, href)
+                     if urlparse(full_url).netloc == urlparse(url).netloc:
+                         article_links.append(full_url)
+                         continue
+                
                 # Filter for article-like links
+                # Broaden keywords slightly but keep relevant
                 if any(keyword in href.lower() or keyword in text.lower() 
-                      for keyword in ['article', 'news', 'post', 'blog', 'story']):
+                      for keyword in ['article', 'news', 'post', 'blog', 'story', 'report', 'analysis']):
                     full_url = urljoin(url, href)
                     if urlparse(full_url).netloc == urlparse(url).netloc:
                         article_links.append(full_url)
             
-            # Limit to avoid too many requests
-            return list(set(article_links))[:20]
+            # Deduplicate locally
+            unique_links = list(set(article_links))
+            self.logger.info(f"Found {len(unique_links)} potential articles on {url}")
+            return unique_links[:20]  # Limit to 20 most recent/relevant
         except Exception as e:
             self.logger.error(f"Error finding article links on {url}: {e}")
             return []
     
+    def _process_source(self, source_config: Dict) -> List[Dict]:
+        """Process a single source (find links and scrape articles)"""
+        source_articles = []
+        self.logger.info(f"Scraping web source: {source_config['name']}")
+        
+        all_links = []
+        for listing_url in source_config['article_links']:
+            links = self.find_article_links(listing_url, source_config['name'])
+            all_links.extend(links)
+        
+        # Remove duplicates
+        all_links = list(set(all_links))
+        
+        # Scrape articles in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            # Create a dictionary to map futures to URLs for error reporting
+            future_to_url = {
+                executor.submit(self.scrape_article, url, source_config['name']): url 
+                for url in all_links[:10]  # Limit per source
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    article = future.result()
+                    if article:
+                        normalized = self.normalize_article(article)
+                        if normalized:
+                            source_articles.append(normalized)
+                except Exception as e:
+                    self.logger.error(f"Error processing {url}: {e}")
+                    
+        self.logger.info(f"Scraped {len(source_articles)} articles from {source_config['name']}")
+        return source_articles
+
     def scrape(self) -> List[Dict]:
         """Scrape all web sources"""
         all_articles = []
         
+        # Process sources sequentially to be polite, but articles within source in parallel
         for source_config in self.sources:
-            self.logger.info(f"Scraping web source: {source_config['name']}")
-            
-            for listing_url in source_config['article_links']:
-                article_links = self.find_article_links(listing_url, source_config['name'])
-                
-                for article_url in article_links[:10]:  # Limit per source
-                    article = self.scrape_article(article_url, source_config['name'])
-                    if article:
-                        normalized = self.normalize_article(article)
-                        if normalized:
-                            all_articles.append(normalized)
-                    
-                    # Be respectful with rate limiting
-                    import time
-                    time.sleep(1)
-            
-            self.logger.info(f"Scraped articles from {source_config['name']}")
+            articles = self._process_source(source_config)
+            all_articles.extend(articles)
         
         return all_articles

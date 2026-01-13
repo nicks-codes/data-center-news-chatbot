@@ -44,13 +44,13 @@ class BaseScraper(ABC):
             )
             
             normalized = {
-                'title': raw_article.get('title', '').strip(),
-                'content': raw_article.get('content', '').strip(),
-                'url': raw_article.get('url', '').strip(),
+                'title': (raw_article.get('title') or '').strip(),
+                'content': (raw_article.get('content') or '').strip(),
+                'url': (raw_article.get('url') or '').strip(),
                 'source': self.source_name,
                 'source_type': self.get_source_type(),
                 'published_date': published_date,
-                'author': raw_article.get('author', '').strip() or None,
+                'author': (raw_article.get('author') or '').strip() or None,
                 'tags': raw_article.get('tags', ''),
                 'article_id': article_id
             }
