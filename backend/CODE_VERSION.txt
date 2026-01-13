@@ -1,0 +1,30 @@
+Code Version Tracking
+=====================
+
+Last Updated: 2024-01-15
+
+Current Components:
+- FastAPI backend
+- RAG-based ChatService
+- Scraping scheduler
+- Multiple scrapers (RSS, Web, Reddit, Twitter, Google News)
+- Vector store with ChromaDB
+- Embedding service
+
+Agent Status: 
+- Agent code location: [UPDATE THIS WHEN YOU ADD YOUR AGENT]
+- Agent type: [UPDATE THIS - e.g., LangChain Agent, Custom Agent, etc.]
+- Last modified: [UPDATE THIS]
+
+Important Files:
+- main.py - FastAPI application entry point
+- scheduler.py - Scraping scheduler
+- services/chat_service.py - RAG chat service
+- [ADD YOUR AGENT FILE HERE]
+
+Backup Status:
+- Last backup: [UPDATE THIS]
+- Backup location: [UPDATE THIS]
+
+Notes:
+- [Add any important notes about your agent here]

@@ -1,0 +1,25 @@
+╔═══════════════════════════════════════════════════════════╗
+║         QUICK BACKUP - DON'T LOSE YOUR CODE!              ║
+╚═══════════════════════════════════════════════════════════╝
+
+🚀 FASTEST WAY TO BACKUP:
+   Right-click backup.ps1 → Run with PowerShell
+
+📋 MANUAL BACKUP:
+   1. Copy entire c:\backend folder
+   2. Paste to safe location (external drive, cloud, etc.)
+   3. Name it: backend_backup_[TODAY'S DATE]
+
+☁️  CLOUD BACKUP (Recommended):
+   - Upload to GitHub (free private repo)
+   - Sync to OneDrive/Dropbox
+   - Email important files to yourself
+
+⏰ SET UP AUTO-BACKUP:
+   - Use Windows Task Scheduler
+   - Run backup.ps1 daily
+   - See BACKUP_README.md for details
+
+💡 TIP: Backup BEFORE making major changes!
+
+═══════════════════════════════════════════════════════════
