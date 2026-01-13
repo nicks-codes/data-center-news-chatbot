@@ -1,0 +1,3 @@
+run = "bash ./replit_start.sh"
+
+# Replit will proxy the port you bind to; the app reads $PORT.

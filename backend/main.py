@@ -184,8 +184,10 @@ async def get_stats():
             # Check if using free services
             ai_provider = os.getenv("AI_PROVIDER", "").lower()
             embedding_provider = os.getenv("EMBEDDING_PROVIDER", "").lower()
-            is_free = (ai_provider in ["groq", "together"] and 
-                      embedding_provider == "sentence-transformers")
+            is_free = (
+                ai_provider in ["groq", "together"]
+                and embedding_provider in ["sentence-transformers", "none", ""]
+            )
             
             # Get cost statistics only if using paid services
             cost_stats = None
