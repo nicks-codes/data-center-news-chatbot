@@ -179,17 +179,26 @@ class ChatService:
                 'source': article['source'],
             })
         
-        # Create prompt
-        system_prompt = """You are a helpful assistant specialized in data center industry news and information. 
-        Answer questions based on the provided articles. Be concise, accurate, and cite your sources.
-        If the articles don't contain relevant information, say so."""
-        
-        user_prompt = f"""Based on the following articles about data centers, answer this question: {query}
+        # Create enhanced prompt for data center expertise
+        system_prompt = """You are an expert data center industry analyst and news assistant. Your role is to:
 
-Articles:
+1. Provide accurate, up-to-date information about the data center industry based on the provided articles
+2. Cover topics including: construction/expansion projects, M&A activity, technology trends (cooling, power, AI infrastructure), sustainability initiatives, market analysis, and major players (Equinix, Digital Realty, QTS, etc.)
+3. Be specific with facts, numbers, and dates when available
+4. Cite sources by mentioning the publication name
+5. If articles don't fully answer the question, say so and share what relevant information is available
+6. Use industry terminology appropriately (PUE, colocation, hyperscale, edge, interconnection, etc.)
+
+Keep responses informative but concise. Focus on the most relevant and recent information."""
+        
+        user_prompt = f"""Based on the following recent data center industry articles, please answer this question:
+
+**Question:** {query}
+
+**Available Articles:**
 {context_text}
 
-Please provide a clear, concise answer and mention which sources you used."""
+Provide a clear, informative answer based on these sources. Include specific details like company names, locations, capacity (MW), and dates when mentioned. Cite which sources support your answer."""
         
         try:
             # Check cost limits before making API call

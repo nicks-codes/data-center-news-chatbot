@@ -181,16 +181,75 @@ class ScrapingScheduler:
         
         logger.info(f"Completed scraping. Total articles found: {len(all_articles)}")
     
+    def cleanup_old_articles(self):
+        """Remove articles older than 90 days to keep database manageable"""
+        from datetime import timedelta
+        
+        db = SessionLocal()
+        try:
+            cutoff_date = datetime.now() - timedelta(days=90)
+            
+            # Get old articles
+            old_articles = db.query(Article).filter(
+                Article.scraped_date < cutoff_date
+            ).all()
+            
+            if not old_articles:
+                logger.info("No old articles to clean up")
+                return
+            
+            # Remove from vector store
+            for article in old_articles:
+                if article.embedding_id:
+                    try:
+                        self.vector_store.delete_article(article.embedding_id)
+                    except Exception as e:
+                        logger.warning(f"Could not delete embedding for article {article.id}: {e}")
+            
+            # Delete from database
+            deleted_count = db.query(Article).filter(
+                Article.scraped_date < cutoff_date
+            ).delete()
+            
+            db.commit()
+            logger.info(f"Cleaned up {deleted_count} articles older than 90 days")
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up old articles: {e}")
+            db.rollback()
+        finally:
+            db.close()
+    
+    def _shutdown(self):
+        """Graceful shutdown handler"""
+        try:
+            if self.scheduler.running:
+                self.scheduler.shutdown(wait=False)
+                logger.info("Scheduler shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+    
     def start(self):
         """Start the scheduler"""
+        if self.is_running:
+            logger.warning("Scheduler is already running")
+            return
+        
         init_db()  # Initialize database tables
         self.scheduler.start()
-        logger.info("Scraping scheduler started")
+        self.is_running = True
+        logger.info(f"Scraping scheduler started (interval: {SCRAPE_INTERVAL} minutes)")
         
-        # Run initial scrape
-        self.run_all_scrapers()
+        # Run initial scrape in background
+        import threading
+        thread = threading.Thread(target=self.run_all_scrapers, daemon=True)
+        thread.start()
     
     def stop(self):
         """Stop the scheduler"""
-        self.scheduler.shutdown()
+        if not self.is_running:
+            return
+        
+        self.scheduler.shutdown(wait=False)
+        self.is_running = False
         logger.info("Scraping scheduler stopped")
