@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -128,6 +128,25 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: list
+
+class SummaryResponse(BaseModel):
+    article_id: int
+    title: str
+    url: str
+    source: str
+    published_date: Optional[str] = None
+    summary: str
+    cached: bool
+
+class DigestRequest(BaseModel):
+    days: int = 7
+    limit: int = 12
+    topic: Optional[str] = None
+
+class DigestResponse(BaseModel):
+    answer: str
+    sources: list
+    meta: Any
 
 @app.get("/")
 async def root():
@@ -485,6 +504,7 @@ async def get_article(article_id: int):
                 "author": article.author,
                 "tags": article.tags,
                 "has_embedding": article.has_embedding,
+                "summary": getattr(article, "summary", None),
             }
         finally:
             db.close()
@@ -492,6 +512,32 @@ async def get_article(article_id: int):
         raise
     except Exception as e:
         logger.error(f"Error getting article: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/articles/{article_id}/summary", response_model=SummaryResponse)
+async def get_article_summary(article_id: int, force: bool = False):
+    """Get (or generate) an AI summary for an article."""
+    try:
+        result = chat_service.summarize_article(article_id, force=force)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return SummaryResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating summary for article {article_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/digest", response_model=DigestResponse)
+async def digest(request: DigestRequest):
+    """Generate an expert digest over recent articles (summarized + synthesized)."""
+    try:
+        result = chat_service.generate_digest(days=request.days, limit=request.limit, topic=request.topic)
+        return DigestResponse(**result)
+    except Exception as e:
+        logger.error(f"Error generating digest: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

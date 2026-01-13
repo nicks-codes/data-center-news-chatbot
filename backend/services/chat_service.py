@@ -9,6 +9,7 @@ import os
 from typing import List, Dict, Optional
 import logging
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 from .embedding_service import EmbeddingService
@@ -233,6 +234,196 @@ class ChatService:
         
         return articles
 
+    def _select_chat_model(self) -> str:
+        if self.provider == "groq":
+            return os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        if self.provider == "together":
+            return os.getenv("TOGETHER_MODEL", "meta-llama/Llama-3-8b-chat-hf")
+        return os.getenv("OPENAI_CHAT_MODEL", "gpt-3.5-turbo")
+
+    def _llm(self, *, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float) -> str:
+        if not self.enabled or not self.client:
+            raise RuntimeError("AI service is not available (missing API key or SDK).")
+
+        # Cost pre-check (best-effort)
+        if self.cost_tracker:
+            self.cost_tracker.record_chat(user_prompt)
+
+        resp = self.client.chat.completions.create(
+            model=self._select_chat_model(),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content or ""
+
+    def summarize_article(self, article_id: int, force: bool = False) -> Dict:
+        """
+        Generate (and cache) a high-signal summary for an article.
+        Returns: {summary, article_id, title, url, source, published_date, cached}
+        """
+        db = SessionLocal()
+        try:
+            a = db.query(Article).filter(Article.id == int(article_id)).first()
+            if not a:
+                return {"error": "Article not found"}
+
+            if a.summary and not force:
+                return {
+                    "article_id": a.id,
+                    "title": a.title,
+                    "url": a.url,
+                    "source": a.source,
+                    "published_date": a.published_date.isoformat() if a.published_date else None,
+                    "summary": a.summary,
+                    "cached": True,
+                }
+
+            if not self.enabled:
+                return {"error": "AI service is not available. Configure GROQ_API_KEY / TOGETHER_API_KEY / OPENAI_API_KEY."}
+
+            system_prompt = """You are an expert data center industry analyst.
+Write a concise, high-signal article summary for an executive audience.
+
+Rules:
+- Use ONLY the provided article text.
+- If details (MW, sqft, location, company, timeline, power/water constraints) are not present, say "not stated".
+- Do not speculate. Do not add outside facts.
+
+Format exactly:
+## Executive summary
+<2-4 sentences>
+
+## Key facts
+- Company/actor:
+- Location/market:
+- Project size/capacity (MW/sqft):
+- Status (proposed/planned/under construction/operational):
+- Timeline/date:
+- Power/water/grid notes:
+
+## Why it matters
+<2-4 bullets>
+"""
+
+            content = (a.content or "")
+            # Guardrail: don't send absurdly long content
+            max_chars = int(os.getenv("SUMMARY_MAX_CHARS", "18000") or "18000")
+            if max_chars > 0 and len(content) > max_chars:
+                content = content[:max_chars]
+
+            user_prompt = f"""Summarize this article.
+
+Title: {a.title}
+Source: {a.source}
+Published: {a.published_date.isoformat() if a.published_date else "unknown"}
+URL: {a.url}
+
+Article text:
+{content}
+"""
+
+            summary = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=650, temperature=0.2).strip()
+
+            a.summary = summary
+            a.summary_model = self._select_chat_model()
+            a.summary_created_at = datetime.utcnow()
+            db.commit()
+
+            return {
+                "article_id": a.id,
+                "title": a.title,
+                "url": a.url,
+                "source": a.source,
+                "published_date": a.published_date.isoformat() if a.published_date else None,
+                "summary": summary,
+                "cached": False,
+            }
+        finally:
+            db.close()
+
+    def generate_digest(self, days: int = 7, limit: int = 12, topic: Optional[str] = None) -> Dict:
+        """
+        Generate an expert digest over recent articles using cached summaries when available.
+        Returns: {answer, sources, meta}
+        """
+        if not self.enabled:
+            return {"answer": "AI service is not available. Configure an API key to enable summaries/digests.", "sources": [], "meta": {}}
+
+        days = max(1, min(int(days or 7), 30))
+        limit = max(3, min(int(limit or 12), 30))
+
+        db = SessionLocal()
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            q = db.query(Article).order_by(Article.published_date.desc().nullslast(), Article.scraped_date.desc())
+            q = q.filter((Article.published_date == None) | (Article.published_date >= cutoff))  # noqa: E711
+            if topic:
+                term = f"%{topic}%"
+                q = q.filter((Article.title.ilike(term)) | (Article.content.ilike(term)))
+            items = q.limit(limit).all()
+        finally:
+            db.close()
+
+        if not items:
+            return {"answer": "No recent articles found for that window.", "sources": [], "meta": {"days": days, "limit": limit}}
+
+        # Build digest context primarily from cached summaries (fallback to short content)
+        blocks = []
+        sources = []
+        for i, a in enumerate(items, 1):
+            published = a.published_date.isoformat() if a.published_date else None
+            summary = a.summary or ""
+            if not summary:
+                # Avoid heavy per-article summarization in digest; fallback to snippet
+                snippet = (a.content or "")[:800]
+                summary = f"## Executive summary\n{snippet}\n"
+            blocks.append(
+                f"[Item {i}]\nTitle: {a.title}\nSource: {a.source}\nPublished: {published}\nURL: {a.url}\nSummary:\n{summary}\n"
+            )
+            sources.append({"title": a.title, "url": a.url, "source": a.source})
+
+        system_prompt = """You are an expert data center industry analyst and operator-adjacent advisor.
+Write a weekly-style digest that synthesizes themes and implications, not just a list.
+
+Rules:
+- Use ONLY the provided items.
+- Cite by including (Source + URL) for each bullet or claim.
+- If something is unclear, say so.
+
+Output format exactly:
+## Executive digest
+<3-6 bullets>
+
+## What’s changing (themes)
+<3-6 bullets>
+
+## Deals & capital
+<bullets or 'None in provided items'>
+
+## Construction & capacity
+<bullets; include MW/sqft/location/status when present>
+
+## Power, grid, and sustainability signals
+<bullets>
+
+## What to do next (actionable)
+<5-8 bullets: questions to ask, risks to watch, follow-ups>
+"""
+
+        topic_line = f"Topic focus: {topic}" if topic else "Topic focus: general data center news"
+        user_prompt = f"""Create a digest for the last {days} days. {topic_line}
+
+Items:
+{chr(10).join(blocks)}
+"""
+
+        answer = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=900, temperature=0.3).strip()
+        return {"answer": answer, "sources": sources, "meta": {"days": days, "limit": limit, "topic": topic}}
+
     def _location_terms(self, query_lower: str) -> List[str]:
         """
         Map common location shorthand to useful match terms.
@@ -410,20 +601,30 @@ class ChatService:
                 'source': article['source'],
             })
         
-        # Create enhanced prompt for data center expertise
-        system_prompt = """You are an expert data center industry analyst and news assistant. Your role is to:
+        # Stronger "expert helper" prompt: always synthesize and summarize first.
+        system_prompt = """You are an expert data center industry analyst and operator-adjacent assistant.
 
-1. Provide accurate, up-to-date information about the data center industry based on the provided articles
-2. Cover topics including: construction/expansion projects, M&A activity, technology trends (cooling, power, AI infrastructure), sustainability initiatives, market analysis, and major players (Equinix, Digital Realty, QTS, etc.)
-3. Be specific with facts, numbers, and dates when available
-4. Cite sources by including the source name and URL for every key claim
-5. If articles don't fully answer the question, say so, but still extract any partial facts that *are* present
-6. Use industry terminology appropriately (PUE, colocation, hyperscale, edge, interconnection, etc.)
+Your job is to synthesize and summarize, not just quote.
 
-Output rules:
-- Prefer a structured answer with headings and bullet points.
-- If the user asks for “latest construction projects” (or similar), list each project as its own bullet with: company, location, size/capacity (MW/sqft) if available, status (proposed/planned/under construction), and date.
-- Never claim a project detail unless it appears in the provided articles."""
+Rules:
+- Use ONLY the provided articles.
+- Do not speculate or add outside facts.
+- When you state a key claim, include (Source + URL) on the same bullet/line.
+- If the articles don't contain an answer, say what is missing and suggest the best next question to ask.
+
+Output format:
+## Executive summary
+<2-5 bullets that directly answer the question>
+
+## Key details (from sources)
+<bullets with numbers/locations/timelines when present>
+
+## What it means / implications
+<3-6 bullets: risks, opportunities, second-order effects>
+
+## What to do next
+<3-6 bullets: actionable follow-ups>
+"""
         
         user_prompt = f"""Based on the following recent data center industry articles, please answer this question:
 
@@ -446,31 +647,8 @@ Provide a clear, informative answer based on these sources. Include specific det
                         'answer': "Sorry, I've reached the daily cost limit. Please try again tomorrow or adjust your cost limits in the .env file.",
                         'sources': []
                     }
-            
-            # Select model based on provider
-            if self.provider == "groq":
-                model = "llama-3.1-8b-instant"  # Free, fast model
-            elif self.provider == "together":
-                model = "meta-llama/Llama-3-8b-chat-hf"  # Free model
-            else:
-                model = "gpt-3.5-turbo"  # OpenAI model
-            
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.4,
-                max_tokens=700
-            )
-            
-            answer = response.choices[0].message.content
-            
-            # Record actual usage (update with actual cost if available)
-            if self.cost_tracker and hasattr(response, 'usage'):
-                # Update with more accurate cost if usage info is available
-                pass  # Cost already recorded in pre-check
+
+            answer = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=900, temperature=0.35)
             
             return {
                 'answer': answer,

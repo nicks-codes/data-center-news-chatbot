@@ -20,6 +20,11 @@ class Article(Base):
     tags = Column(String(500), nullable=True)
     has_embedding = Column(Boolean, default=False, nullable=False)
     embedding_id = Column(String(200), nullable=True)
+
+    # AI-generated summary (cached)
+    summary = Column(Text, nullable=True)
+    summary_model = Column(String(100), nullable=True)
+    summary_created_at = Column(DateTime, nullable=True)
     
     # Indexes for better query performance
     __table_args__ = (

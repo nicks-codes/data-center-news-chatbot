@@ -1,6 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -62,3 +63,22 @@ def init_db():
     # Import models to register them with Base
     from . import models
     Base.metadata.create_all(bind=engine)
+
+    # Lightweight migration for SQLite: add new columns if missing.
+    # This keeps existing deployments working without Alembic.
+    if DATABASE_URL.startswith("sqlite"):
+        try:
+            with engine.begin() as conn:
+                cols = conn.execute(text("PRAGMA table_info(articles)")).fetchall()
+                existing = {row[1] for row in cols}  # row[1] = name
+
+                def add_col(name: str, ddl: str):
+                    if name not in existing:
+                        conn.execute(text(f"ALTER TABLE articles ADD COLUMN {ddl}"))
+
+                add_col("summary", "summary TEXT")
+                add_col("summary_model", "summary_model VARCHAR(100)")
+                add_col("summary_created_at", "summary_created_at DATETIME")
+        except Exception:
+            # If this fails, the app can still run; summaries will just be unavailable.
+            pass
