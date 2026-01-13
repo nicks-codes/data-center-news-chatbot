@@ -4,8 +4,10 @@ Base scraper class with common functionality
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Set
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 import hashlib
 import logging
+import os
 import re
 
 logger = logging.getLogger(__name__)
@@ -135,6 +137,13 @@ class BaseScraper(ABC):
         if isinstance(date_input, datetime):
             return date_input
         
+        # Common non-string formats (e.g., time.struct_time tuples)
+        if hasattr(date_input, "tm_year") and hasattr(date_input, "tm_mon") and hasattr(date_input, "tm_mday"):
+            try:
+                return datetime(*date_input[:6])
+            except Exception:
+                return None
+        
         if not isinstance(date_input, str):
             return None
         
@@ -154,17 +163,36 @@ class BaseScraper(ABC):
             '%d/%m/%Y',
         ]
         
-        # Clean the date string
         date_str = date_input.strip()
-        # Remove timezone info for simpler parsing
-        date_str = re.sub(r'[+-]\d{2}:\d{2}$', '', date_str)
-        date_str = date_str.replace('Z', '').replace('T', ' ')
+        if not date_str:
+            return None
         
-        for fmt in formats:
-            try:
-                return datetime.strptime(date_str[:len(fmt.replace('%', ''))], fmt)
-            except ValueError:
-                continue
+        # RFC 2822 / RSS-style dates (fast path)
+        try:
+            dt = parsedate_to_datetime(date_str)
+            # `parsedate_to_datetime` can return aware datetimes; downstream code expects naive
+            return dt.replace(tzinfo=None) if dt else None
+        except Exception:
+            pass
+        
+        # ISO-ish dates
+        try:
+            iso_str = date_str.replace("Z", "+00:00")
+            return datetime.fromisoformat(iso_str).replace(tzinfo=None)
+        except Exception:
+            pass
+        
+        # Try common formats with a few cleaned variants
+        cleaned_variants = [date_str]
+        cleaned_variants.append(re.sub(r'[+-]\d{2}:\d{2}$', '', date_str))  # strip "+00:00"
+        cleaned_variants.append(date_str.replace('T', ' ').replace('Z', ''))
+        
+        for candidate in cleaned_variants:
+            for fmt in formats:
+                try:
+                    return datetime.strptime(candidate, fmt)
+                except ValueError:
+                    continue
         
         # Try dateutil parser as fallback
         try:
@@ -188,6 +216,14 @@ class BaseScraper(ABC):
             
             # Skip very short content (likely not real articles)
             if len(content) < 50 and len(title) < 20:
+                return None
+            
+            # Apply relevance filtering centrally (can be tuned via env)
+            try:
+                threshold = float(os.getenv("RELEVANCE_THRESHOLD", "0.2"))
+            except ValueError:
+                threshold = 0.2
+            if not self.is_relevant(title, content, threshold=threshold):
                 return None
             
             # Parse published date

@@ -30,6 +30,13 @@ WEB_SOURCES = [
         'article_selector': 'a[href*="/news/"]',
         'priority': 1,
     },
+    {
+        'name': 'Baxtel News',
+        'base_url': 'https://baxtel.com',
+        'article_links': ['https://baxtel.com/news'],
+        'article_selector': 'a[href^="/news/"]',
+        'priority': 1,
+    },
     # Industry Analysis
     {
         'name': 'Semi Analysis',
@@ -417,12 +424,10 @@ class WebScraper(BaseScraper):
                 for article_url in article_links[:8]:  # Limit per listing page
                     article = self.scrape_article(article_url, source_name)
                     if article:
-                        # Check relevance
-                        if self.is_relevant(article.get('title', ''), article.get('content', '')):
-                            normalized = self.normalize_article(article)
-                            if normalized:
-                                all_articles.append(normalized)
-                                source_articles += 1
+                        normalized = self.normalize_article(article)
+                        if normalized:
+                            all_articles.append(normalized)
+                            source_articles += 1
                     
                     # Rate limiting
                     time.sleep(1.5)

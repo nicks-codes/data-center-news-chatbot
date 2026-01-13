@@ -77,7 +77,13 @@ class TwitterScraper(BaseScraper):
                 if tweets.data:
                     for tweet in tweets.data:
                         try:
-                            published_date = datetime.fromisoformat(tweet.created_at.replace('Z', '+00:00'))
+                            created_at = getattr(tweet, "created_at", None)
+                            if isinstance(created_at, datetime):
+                                published_date = created_at
+                            elif isinstance(created_at, str):
+                                published_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            else:
+                                published_date = None
                             
                             article = {
                                 'title': tweet.text[:100] + "..." if len(tweet.text) > 100 else tweet.text,

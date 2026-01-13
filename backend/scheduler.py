@@ -76,17 +76,29 @@ class ScrapingScheduler:
     
     def deduplicate_articles(self, articles: list, db) -> list:
         """Remove duplicate articles based on URL"""
+        if not articles:
+            return []
+        
+        # Collect candidate URLs and fetch existing URLs in one query (much faster than N queries)
+        urls = [a.get('url', '') for a in articles if a.get('url')]
+        existing_urls = set()
+        if urls:
+            try:
+                existing_urls = {row[0] for row in db.query(Article.url).filter(Article.url.in_(urls)).all()}
+            except Exception as e:
+                logger.warning(f"Could not prefetch existing URLs for dedupe: {e}")
+                existing_urls = set()
+        
         unique_articles = []
         seen_urls = set()
-        
         for article in articles:
             url = article.get('url', '')
-            if url and url not in seen_urls:
-                # Check if article already exists in database
-                existing = db.query(Article).filter(Article.url == url).first()
-                if not existing:
-                    unique_articles.append(article)
-                    seen_urls.add(url)
+            if not url:
+                continue
+            if url in seen_urls or url in existing_urls:
+                continue
+            unique_articles.append(article)
+            seen_urls.add(url)
         
         return unique_articles
     
