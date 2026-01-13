@@ -1,0 +1,39 @@
+# Render.com deployment configuration
+# Deploy at: https://dashboard.render.com/
+
+services:
+  # Main FastAPI backend
+  - type: web
+    name: datacenter-news-api
+    runtime: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: DATABASE_URL
+        sync: false  # Set in Render dashboard
+      - key: GROQ_API_KEY
+        sync: false  # Set in Render dashboard
+      - key: AI_PROVIDER
+        value: groq
+      - key: EMBEDDING_PROVIDER
+        value: sentence-transformers
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+
+  # Optional: Streamlit frontend
+  - type: web
+    name: datacenter-news-ui
+    runtime: python
+    buildCommand: pip install -r backend/requirements.txt && pip install streamlit
+    startCommand: cd backend && streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: API_URL
+        fromService:
+          type: web
+          name: datacenter-news-api
+          property: host

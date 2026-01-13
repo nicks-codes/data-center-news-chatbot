@@ -1,0 +1,6 @@
+# Lightweight requirements for Streamlit Cloud deployment
+# This file only includes what's needed for the Streamlit UI frontend
+# The heavy ML dependencies (torch, sentence-transformers) run on the API backend
+
+streamlit>=1.29.0
+requests>=2.31.0

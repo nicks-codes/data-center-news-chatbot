@@ -1,11 +1,12 @@
 """
-Scheduler for running scrapers continuously
+Scheduler for running scrapers continuously with improved error handling
 """
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.schedulers.base import SchedulerNotRunningError
 import logging
 import atexit
+import os
 from datetime import datetime
 import os
 import threading
@@ -15,6 +16,7 @@ from .scrapers.web_scraper import WebScraper
 from .scrapers.reddit_scraper import RedditScraper
 from .scrapers.twitter_scraper import TwitterScraper
 from .scrapers.google_news_scraper import GoogleNewsScraper
+from .scrapers.base_scraper import BaseScraper
 from .database.models import Article
 from .database.db import SessionLocal, init_db, canonicalize_url, hash_url
 from .services.embedding_service import EmbeddingService
@@ -23,17 +25,30 @@ from .utils.relevance import score_and_tag_article
 
 logger = logging.getLogger(__name__)
 
+# Scraping interval in minutes (configurable via environment)
+SCRAPE_INTERVAL = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "30"))
+
+# Relevance threshold for filtering articles
+RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.2"))
+
+
 class ScrapingScheduler:
-    """Manages scheduled scraping tasks"""
+    """Manages scheduled scraping tasks with improved error handling and filtering"""
     
     def __init__(self):
-        self.scheduler = BackgroundScheduler()
+        self.scheduler = BackgroundScheduler(
+            job_defaults={
+                'coalesce': True,  # Combine missed runs
+                'max_instances': 1,  # Only one instance at a time
+                'misfire_grace_time': 60 * 15,  # 15 min grace period
+            }
+        )
         self.scrapers = [
-            RSSScraper(),
-            WebScraper(),
-            RedditScraper(),
-            TwitterScraper(),
-            GoogleNewsScraper(),
+            RSSScraper(),  # Primary source - most reliable
+            GoogleNewsScraper(),  # Good coverage
+            WebScraper(),  # Supplementary
+            RedditScraper(),  # Community discussions
+            TwitterScraper(),  # Real-time updates
         ]
         self.embedding_service = EmbeddingService()
         self.vector_store = VectorStore()
@@ -51,6 +66,15 @@ class ScrapingScheduler:
             trigger=IntervalTrigger(minutes=interval_minutes),
             id='scrape_articles',
             name='Scrape all news sources',
+            replace_existing=True
+        )
+        
+        # Run cleanup job daily
+        self.scheduler.add_job(
+            func=self.cleanup_old_articles,
+            trigger=IntervalTrigger(hours=24),
+            id='cleanup_articles',
+            name='Clean up old articles',
             replace_existing=True
         )
         
@@ -228,16 +252,75 @@ class ScrapingScheduler:
         
         logger.info(f"Completed scraping. Total articles found: {len(all_articles)}")
     
+    def cleanup_old_articles(self):
+        """Remove articles older than 90 days to keep database manageable"""
+        from datetime import timedelta
+        
+        db = SessionLocal()
+        try:
+            cutoff_date = datetime.now() - timedelta(days=90)
+            
+            # Get old articles
+            old_articles = db.query(Article).filter(
+                Article.scraped_date < cutoff_date
+            ).all()
+            
+            if not old_articles:
+                logger.info("No old articles to clean up")
+                return
+            
+            # Remove from vector store
+            for article in old_articles:
+                if article.embedding_id:
+                    try:
+                        self.vector_store.delete_article(article.embedding_id)
+                    except Exception as e:
+                        logger.warning(f"Could not delete embedding for article {article.id}: {e}")
+            
+            # Delete from database
+            deleted_count = db.query(Article).filter(
+                Article.scraped_date < cutoff_date
+            ).delete()
+            
+            db.commit()
+            logger.info(f"Cleaned up {deleted_count} articles older than 90 days")
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up old articles: {e}")
+            db.rollback()
+        finally:
+            db.close()
+    
+    def _shutdown(self):
+        """Graceful shutdown handler"""
+        try:
+            if self.scheduler.running:
+                self.scheduler.shutdown(wait=False)
+                logger.info("Scheduler shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+    
     def start(self):
         """Start the scheduler"""
+        if self.is_running:
+            logger.warning("Scheduler is already running")
+            return
+        
         init_db()  # Initialize database tables
         self.scheduler.start()
-        logger.info("Scraping scheduler started")
+        self.is_running = True
+        logger.info(f"Scraping scheduler started (interval: {SCRAPE_INTERVAL} minutes)")
         
-        # Run initial scrape
-        self.run_all_scrapers()
+        # Run initial scrape in background
+        import threading
+        thread = threading.Thread(target=self.run_all_scrapers, daemon=True)
+        thread.start()
     
     def stop(self):
         """Stop the scheduler"""
-        self.scheduler.shutdown()
+        if not self.is_running:
+            return
+        
+        self.scheduler.shutdown(wait=False)
+        self.is_running = False
         logger.info("Scraping scheduler stopped")

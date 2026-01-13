@@ -1,0 +1,42 @@
+# Lightweight Dockerfile for Data Center News Chatbot
+# Optimized for Railway/Render free tier (< 4GB image size)
+
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install minimal system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create app directory
+WORKDIR /app
+
+# Copy and install lightweight requirements
+COPY backend/requirements-light.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY backend/ ./backend/
+COPY frontend/ ./frontend/
+
+# Create necessary directories
+RUN mkdir -p /app/data /app/chroma_db
+
+# Set environment defaults (uses Groq for AI, chromadb without heavy embeddings)
+ENV DATABASE_URL=sqlite:///./data/datacenter_news.db \
+    CHROMA_DB_PATH=/app/chroma_db \
+    EMBEDDING_PROVIDER=none \
+    AI_PROVIDER=groq
+
+# Expose port
+EXPOSE 8000
+
+# Run FastAPI (uses PORT env var for Railway/Render)
+CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

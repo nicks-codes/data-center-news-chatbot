@@ -157,12 +157,26 @@ async def get_stats():
         from .database.models import Article
         from .services.vector_store import VectorStore
         from .services.cost_tracker import CostTracker
+        from sqlalchemy import func
         import os
         
         db = SessionLocal()
         try:
             total_articles = db.query(Article).count()
             articles_with_embeddings = db.query(Article).filter(Article.has_embedding == True).count()
+            
+            # Get source breakdown
+            source_counts = db.query(
+                Article.source_type, 
+                func.count(Article.id)
+            ).group_by(Article.source_type).all()
+            sources = {source: count for source, count in source_counts}
+            
+            # Get recent articles count (last 24 hours)
+            from datetime import datetime, timedelta
+            recent_count = db.query(Article).filter(
+                Article.scraped_date >= datetime.now() - timedelta(hours=24)
+            ).count()
             
             vector_store = VectorStore()
             vector_count = vector_store.get_collection_size()
@@ -183,14 +197,126 @@ async def get_stats():
                 "total_articles": total_articles,
                 "articles_with_embeddings": articles_with_embeddings,
                 "vector_store_size": vector_count,
+                "recent_articles_24h": recent_count,
+                "sources": sources,
                 "cost_stats": cost_stats,
-                "is_free": is_free
+                "is_free": is_free,
+                "ai_provider": ai_provider,
+                "embedding_provider": embedding_provider,
             }
         finally:
             db.close()
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/scrape")
+async def trigger_scrape():
+    """Manually trigger a scraping run"""
+    global scheduler
+    try:
+        if scheduler:
+            # Run in background thread to not block
+            import threading
+            thread = threading.Thread(target=scheduler.run_all_scrapers)
+            thread.start()
+            return {"status": "started", "message": "Scraping started in background"}
+        else:
+            return {"status": "error", "message": "Scheduler not initialized"}
+    except Exception as e:
+        logger.error(f"Error triggering scrape: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/articles")
+async def get_articles(
+    limit: int = 20,
+    offset: int = 0,
+    source_type: Optional[str] = None,
+    search: Optional[str] = None
+):
+    """Get recent articles with optional filtering"""
+    try:
+        from .database.db import SessionLocal
+        from .database.models import Article
+        
+        db = SessionLocal()
+        try:
+            query = db.query(Article).order_by(Article.published_date.desc())
+            
+            if source_type:
+                query = query.filter(Article.source_type == source_type)
+            
+            if search:
+                search_term = f"%{search}%"
+                query = query.filter(
+                    (Article.title.ilike(search_term)) | 
+                    (Article.content.ilike(search_term))
+                )
+            
+            total = query.count()
+            articles = query.offset(offset).limit(limit).all()
+            
+            return {
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "articles": [
+                    {
+                        "id": a.id,
+                        "title": a.title,
+                        "url": a.url,
+                        "source": a.source,
+                        "source_type": a.source_type,
+                        "published_date": a.published_date.isoformat() if a.published_date else None,
+                        "scraped_date": a.scraped_date.isoformat() if a.scraped_date else None,
+                        "has_embedding": a.has_embedding,
+                    }
+                    for a in articles
+                ]
+            }
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Error getting articles: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/articles/{article_id}")
+async def get_article(article_id: int):
+    """Get a specific article by ID"""
+    try:
+        from .database.db import SessionLocal
+        from .database.models import Article
+        
+        db = SessionLocal()
+        try:
+            article = db.query(Article).filter(Article.id == article_id).first()
+            if not article:
+                raise HTTPException(status_code=404, detail="Article not found")
+            
+            return {
+                "id": article.id,
+                "title": article.title,
+                "content": article.content,
+                "url": article.url,
+                "source": article.source,
+                "source_type": article.source_type,
+                "published_date": article.published_date.isoformat() if article.published_date else None,
+                "scraped_date": article.scraped_date.isoformat() if article.scraped_date else None,
+                "author": article.author,
+                "tags": article.tags,
+                "has_embedding": article.has_embedding,
+            }
+        finally:
+            db.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting article: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

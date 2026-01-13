@@ -1,0 +1,5 @@
+# Requirements for Streamlit Cloud deployment
+# This is a lightweight frontend that connects to the API backend
+
+streamlit>=1.29.0
+requests>=2.31.0

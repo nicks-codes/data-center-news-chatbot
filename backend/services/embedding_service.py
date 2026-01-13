@@ -36,6 +36,11 @@ class EmbeddingService:
         self.cost_tracker = None
         self.local_model = None
         
+        # Skip embeddings entirely if provider is "none" (lightweight mode)
+        if self.provider == "none":
+            logger.info("Embeddings disabled (lightweight mode) - using keyword search only")
+            return
+        
         if self.provider == "sentence-transformers":
             # Free local embeddings using Sentence Transformers
             try:
@@ -47,12 +52,12 @@ class EmbeddingService:
                 self.cost_tracker = None  # No cost tracking for free local model
                 logger.info("Sentence Transformers loaded successfully (free embeddings)")
             except ImportError:
-                logger.warning("sentence-transformers not installed. Install with: pip install sentence-transformers")
+                logger.warning("sentence-transformers not installed. Using keyword search instead.")
             except Exception as e:
-                logger.error(f"Error loading Sentence Transformers: {e}")
+                logger.warning(f"Could not load Sentence Transformers: {e}. Using keyword search instead.")
         
         # Fallback to OpenAI if local model not available
-        if not self.enabled:
+        if not self.enabled and self.provider != "none":
             api_key = os.getenv("OPENAI_API_KEY")
             if api_key:
                 self.client = openai.OpenAI(api_key=api_key)
@@ -60,7 +65,7 @@ class EmbeddingService:
                 self.cost_tracker = CostTracker()
                 logger.info("Using OpenAI embeddings (paid)")
             else:
-                logger.warning("No embedding provider configured. Embeddings will be disabled.")
+                logger.info("No embedding provider available. Using keyword search only.")
     
     def generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding for a single text"""
