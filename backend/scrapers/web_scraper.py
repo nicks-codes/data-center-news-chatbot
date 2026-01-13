@@ -13,6 +13,12 @@ from .base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
+# Optional high-quality extraction (falls back to BeautifulSoup heuristics)
+try:  # pragma: no cover
+    import trafilatura
+except Exception:  # pragma: no cover
+    trafilatura = None
+
 # Comprehensive web scraping configurations for data center news
 WEB_SOURCES = [
     # Primary Data Center News Sites
@@ -309,8 +315,23 @@ class WebScraper(BaseScraper):
             # Clean up title - remove site name suffix
             title = re.sub(r'\s*[\|–-]\s*[^|–-]+$', '', title).strip()
             
-            # Extract content
-            article_content = self.extract_text(soup)
+            # Extract content (prefer trafilatura when available)
+            article_content = ""
+            if trafilatura is not None:
+                try:
+                    extracted = trafilatura.extract(
+                        content,
+                        url=url,
+                        include_comments=False,
+                        include_tables=False,
+                        output_format="txt",
+                    )
+                    if extracted:
+                        article_content = extracted
+                except Exception:
+                    article_content = ""
+            if not article_content:
+                article_content = self.extract_text(soup)
             
             # Extract date
             published_date = self.extract_date(soup)

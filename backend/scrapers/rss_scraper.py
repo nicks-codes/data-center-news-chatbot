@@ -13,6 +13,12 @@ from .base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
+# Optional high-quality extraction (falls back to BeautifulSoup heuristics)
+try:  # pragma: no cover
+    import trafilatura
+except Exception:  # pragma: no cover
+    trafilatura = None
+
 # RSS feed URLs for data center news sites - comprehensive list
 RSS_FEEDS = [
     # Primary Data Center News Sources
@@ -182,6 +188,19 @@ class RSSScraper(BaseScraper):
             return ""
         
         try:
+            # Prefer trafilatura when available (better boilerplate removal on many sites)
+            if trafilatura is not None:
+                extracted = trafilatura.extract(
+                    resp.text,
+                    url=url,
+                    include_comments=False,
+                    include_tables=False,
+                    output_format="txt",
+                )
+                if extracted:
+                    extracted = re.sub(r"\s+", " ", extracted).strip()
+                    return extracted[:8000]
+
             soup = BeautifulSoup(resp.text, "html.parser")
             
             # Remove noisy elements

@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtualenvs
+.venv/
+venv/
+ENV/
+
+# Local environment and secrets
+.env
+.env.*
+
+# Local DB / vector store artifacts
+backend/datacenter_news.db
+datacenter_news.db
+chroma_db/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
