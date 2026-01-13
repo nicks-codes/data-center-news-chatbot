@@ -41,8 +41,8 @@ ENV DATABASE_URL=sqlite:///./data/datacenter_news.db \
 # Expose ports
 EXPOSE 8000 8501
 
-# Default command runs FastAPI
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command runs FastAPI (uses PORT env var for Railway/Render compatibility)
+CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 
 # ============================================
@@ -52,7 +52,7 @@ CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port
 # Target: FastAPI only
 FROM base as fastapi
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 # Target: Streamlit only
 FROM base as streamlit
@@ -64,6 +64,4 @@ CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.add
 # Target: Both services (for development)
 FROM base as full
 EXPOSE 8000 8501
-COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh 2>/dev/null || true
-CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
