@@ -1,10 +1,11 @@
 """
-Scheduler for running scrapers continuously
+Scheduler for running scrapers continuously with improved error handling
 """
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import logging
 import atexit
+import os
 from datetime import datetime
 
 from .scrapers.rss_scraper import RSSScraper
@@ -12,6 +13,7 @@ from .scrapers.web_scraper import WebScraper
 from .scrapers.reddit_scraper import RedditScraper
 from .scrapers.twitter_scraper import TwitterScraper
 from .scrapers.google_news_scraper import GoogleNewsScraper
+from .scrapers.base_scraper import BaseScraper
 from .database.models import Article
 from .database.db import SessionLocal, init_db
 from .services.embedding_service import EmbeddingService
@@ -19,35 +21,58 @@ from .services.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
+# Scraping interval in minutes (configurable via environment)
+SCRAPE_INTERVAL = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "30"))
+
+# Relevance threshold for filtering articles
+RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.2"))
+
+
 class ScrapingScheduler:
-    """Manages scheduled scraping tasks"""
+    """Manages scheduled scraping tasks with improved error handling and filtering"""
     
     def __init__(self):
-        self.scheduler = BackgroundScheduler()
+        self.scheduler = BackgroundScheduler(
+            job_defaults={
+                'coalesce': True,  # Combine missed runs
+                'max_instances': 1,  # Only one instance at a time
+                'misfire_grace_time': 60 * 15,  # 15 min grace period
+            }
+        )
         self.scrapers = [
-            RSSScraper(),
-            WebScraper(),
-            RedditScraper(),
-            TwitterScraper(),
-            GoogleNewsScraper(),
+            RSSScraper(),  # Primary source - most reliable
+            GoogleNewsScraper(),  # Good coverage
+            WebScraper(),  # Supplementary
+            RedditScraper(),  # Community discussions
+            TwitterScraper(),  # Real-time updates
         ]
         self.embedding_service = EmbeddingService()
         self.vector_store = VectorStore()
+        self.is_running = False
         self._setup_scheduler()
     
     def _setup_scheduler(self):
         """Set up scheduled tasks"""
-        # Run scrapers every 30 minutes
+        # Run scrapers at configured interval
         self.scheduler.add_job(
             func=self.run_all_scrapers,
-            trigger=IntervalTrigger(minutes=30),
+            trigger=IntervalTrigger(minutes=SCRAPE_INTERVAL),
             id='scrape_articles',
             name='Scrape all news sources',
             replace_existing=True
         )
         
+        # Run cleanup job daily
+        self.scheduler.add_job(
+            func=self.cleanup_old_articles,
+            trigger=IntervalTrigger(hours=24),
+            id='cleanup_articles',
+            name='Clean up old articles',
+            replace_existing=True
+        )
+        
         # Register shutdown handler
-        atexit.register(lambda: self.scheduler.shutdown())
+        atexit.register(self._shutdown)
     
     def deduplicate_articles(self, articles: list, db) -> list:
         """Remove duplicate articles based on URL"""
