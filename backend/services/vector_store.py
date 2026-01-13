@@ -43,11 +43,12 @@ class VectorStore:
             logger.warning("ChromaDB not available, cannot add article")
             return False
         try:
-            self.collection.add(
-                ids=[article_id],
-                embeddings=[embedding],
-                metadatas=[metadata]
-            )
+            # Use upsert when available to make indexing idempotent
+            upsert = getattr(self.collection, "upsert", None)
+            if callable(upsert):
+                upsert(ids=[article_id], embeddings=[embedding], metadatas=[metadata])
+            else:
+                self.collection.add(ids=[article_id], embeddings=[embedding], metadatas=[metadata])
             return True
         except Exception as e:
             logger.error(f"Error adding article to vector store: {e}")
@@ -59,11 +60,11 @@ class VectorStore:
             logger.warning("ChromaDB not available, cannot add articles")
             return False
         try:
-            self.collection.add(
-                ids=article_ids,
-                embeddings=embeddings,
-                metadatas=metadatas
-            )
+            upsert = getattr(self.collection, "upsert", None)
+            if callable(upsert):
+                upsert(ids=article_ids, embeddings=embeddings, metadatas=metadatas)
+            else:
+                self.collection.add(ids=article_ids, embeddings=embeddings, metadatas=metadatas)
             return True
         except Exception as e:
             logger.error(f"Error adding articles batch to vector store: {e}")

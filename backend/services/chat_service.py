@@ -1,10 +1,14 @@
 """
 RAG-based chat service for answering questions about data center news
 """
-import openai
+try:
+    import openai
+except ImportError:  # pragma: no cover
+    openai = None
 import os
 from typing import List, Dict, Optional
 import logging
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from .embedding_service import EmbeddingService
@@ -41,6 +45,10 @@ class ChatService:
         self.provider = os.getenv("AI_PROVIDER", "groq").lower()  # groq, together, openai
         self.enabled = False
         self.client = None
+        
+        if openai is None:
+            logger.warning("openai SDK not installed. Chat providers (Groq/Together/OpenAI) will be disabled.")
+            return
         
         if self.provider == "groq":
             groq_key = os.getenv("GROQ_API_KEY")
@@ -85,11 +93,20 @@ class ChatService:
         articles = []
         
         try:
-            # Try semantic search first (if embeddings available)
-            query_embedding = self.embedding_service.generate_embedding(query)
+            # Try semantic search first only if the vector store has data
+            vector_count = 0
+            try:
+                vector_count = self.vector_store.get_collection_size()
+            except Exception:
+                vector_count = 0
+            
+            if vector_count > 0:
+                query_embedding = self.embedding_service.generate_embedding(query)
+            else:
+                query_embedding = None
+            
             if query_embedding:
-                # Search vector store
-                similar_articles = self.vector_store.search_similar(query_embedding, n_results=n_results)
+                similar_articles = self.vector_store.search_similar(query_embedding, n_results=max(n_results, 8))
                 
                 for article_data in similar_articles:
                     metadata = article_data.get('metadata', {})
@@ -109,42 +126,66 @@ class ChatService:
                             'content': article.content,
                             'url': article.url,
                             'source': article.source,
+                            'source_type': article.source_type,
                             'published_date': article.published_date.isoformat() if article.published_date else None,
                         })
             
             # Fallback to keyword search if no semantic results
             if not articles:
-                # Simple keyword search in title and content
                 query_lower = query.lower()
-                query_words = query_lower.split()
                 
-                all_articles = db.query(Article).order_by(Article.published_date.desc()).limit(50).all()
+                # Basic tokenization + stopword filtering
+                tokens = re.findall(r"[a-z0-9]+", query_lower)
+                stop = {
+                    "the","a","an","and","or","to","of","in","on","for","with","about","latest",
+                    "what","which","who","how","are","is","was","were","be","been","from",
+                    "data","center","centers","datacenter","news"
+                }
+                query_words = [t for t in tokens if t not in stop and len(t) > 2]
                 
-                for article in all_articles:
-                    title_lower = article.title.lower() if article.title else ""
-                    content_lower = article.content.lower() if article.content else ""
+                # Intent expansion for common asks (construction/projects)
+                construction_terms = {
+                    "construction","build","building","built","project","projects","development",
+                    "planned","planning","proposal","proposed","campus","facility","site",
+                    "break","ground","megawatt","mw","expansion","expand"
+                }
+                if any(t in query_lower for t in ["construction", "projects", "build", "building", "break ground", "proposed", "planned"]):
+                    query_words.extend(sorted(construction_terms))
+                
+                # Pull a larger, recent-ish candidate set
+                candidates = db.query(Article).order_by(Article.published_date.desc()).limit(500).all()
+                
+                for article in candidates:
+                    title_lower = (article.title or "").lower()
+                    content_lower = (article.content or "").lower()
                     
-                    # Score based on keyword matches
                     score = 0
                     for word in query_words:
+                        if not word:
+                            continue
                         if word in title_lower:
-                            score += 3  # Title matches are more important
+                            score += 5
                         if word in content_lower:
                             score += 1
+                    
+                    # Bonus for construction-like phrasing in title
+                    if any(k in title_lower for k in ["mw", "megawatt", "data center", "datacenter", "campus", "build", "proposed", "planned", "break ground"]):
+                        score += 2
                     
                     if score > 0:
                         articles.append({
                             'title': article.title,
-                            'content': article.content[:1000],  # Limit content
+                            'content': (article.content or "")[:2000],
                             'url': article.url,
                             'source': article.source,
+                            'source_type': article.source_type,
                             'published_date': article.published_date.isoformat() if article.published_date else None,
                             'score': score
                         })
                 
                 # Sort by score and take top results
-                articles.sort(key=lambda x: x.get('score', 0), reverse=True)
-                articles = articles[:n_results]
+                articles.sort(key=lambda x: (x.get('score', 0), x.get('published_date') or ""), reverse=True)
+                articles = articles[:max(n_results, 10)]
                 
                 # Remove score before returning
                 for article in articles:
@@ -170,7 +211,11 @@ class ChatService:
             context_text += f"\n[Article {i}]\n"
             context_text += f"Title: {article['title']}\n"
             context_text += f"Source: {article['source']}\n"
-            context_text += f"Content: {article['content'][:500]}...\n"  # Limit content length
+            if article.get("published_date"):
+                context_text += f"Published: {article['published_date']}\n"
+            if article.get("source_type"):
+                context_text += f"Source Type: {article['source_type']}\n"
+            context_text += f"Content: {article['content'][:1200]}...\n"
             context_text += f"URL: {article['url']}\n"
             
             sources.append({
@@ -185,11 +230,14 @@ class ChatService:
 1. Provide accurate, up-to-date information about the data center industry based on the provided articles
 2. Cover topics including: construction/expansion projects, M&A activity, technology trends (cooling, power, AI infrastructure), sustainability initiatives, market analysis, and major players (Equinix, Digital Realty, QTS, etc.)
 3. Be specific with facts, numbers, and dates when available
-4. Cite sources by mentioning the publication name
-5. If articles don't fully answer the question, say so and share what relevant information is available
+4. Cite sources by including the source name and URL for every key claim
+5. If articles don't fully answer the question, say so, but still extract any partial facts that *are* present
 6. Use industry terminology appropriately (PUE, colocation, hyperscale, edge, interconnection, etc.)
 
-Keep responses informative but concise. Focus on the most relevant and recent information."""
+Output rules:
+- Prefer a structured answer with headings and bullet points.
+- If the user asks for “latest construction projects” (or similar), list each project as its own bullet with: company, location, size/capacity (MW/sqft) if available, status (proposed/planned/under construction), and date.
+- Never claim a project detail unless it appears in the provided articles."""
         
         user_prompt = f"""Based on the following recent data center industry articles, please answer this question:
 
@@ -227,8 +275,8 @@ Provide a clear, informative answer based on these sources. Include specific det
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.7,
-                max_tokens=500
+                temperature=0.4,
+                max_tokens=700
             )
             
             answer = response.choices[0].message.content

@@ -1,7 +1,10 @@
 """
 Service for generating embeddings using OpenAI API
 """
-import openai
+try:
+    import openai
+except ImportError:  # pragma: no cover
+    openai = None
 import os
 from typing import List, Optional
 import logging
@@ -59,7 +62,7 @@ class EmbeddingService:
         # Fallback to OpenAI if local model not available
         if not self.enabled and self.provider != "none":
             api_key = os.getenv("OPENAI_API_KEY")
-            if api_key:
+            if api_key and openai is not None:
                 self.client = openai.OpenAI(api_key=api_key)
                 self.enabled = True
                 self.cost_tracker = CostTracker()

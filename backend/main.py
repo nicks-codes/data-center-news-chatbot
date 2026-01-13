@@ -10,6 +10,7 @@ from typing import Optional
 import os
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from .services.chat_service import ChatService
 from .scheduler import ScrapingScheduler
@@ -39,6 +40,15 @@ logger = logging.getLogger(__name__)
 
 # Global scheduler instance
 scheduler = None
+index_state = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "processed": 0,
+    "embedded": 0,
+    "failed": 0,
+    "last_error": None,
+}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -227,6 +237,137 @@ async def trigger_scrape():
     except Exception as e:
         logger.error(f"Error triggering scrape: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ReindexRequest(BaseModel):
+    force: bool = False
+    limit: int = 0  # 0 = no explicit limit
+    batch_size: int = 25
+
+
+@app.get("/api/index_status")
+async def index_status():
+    """Get current embedding/indexing status."""
+    try:
+        from .database.db import SessionLocal
+        from .database.models import Article
+        from .services.vector_store import VectorStore
+        from .services.embedding_service import EmbeddingService
+
+        db = SessionLocal()
+        try:
+            total_articles = db.query(Article).count()
+            embedded_articles = db.query(Article).filter(Article.has_embedding == True).count()
+        finally:
+            db.close()
+
+        vector_store = VectorStore()
+        embedding_service = EmbeddingService()
+        return {
+            "total_articles": total_articles,
+            "embedded_articles": embedded_articles,
+            "vector_store_size": vector_store.get_collection_size(),
+            "embedding_enabled": bool(getattr(embedding_service, "enabled", False)),
+            "embedding_provider": os.getenv("EMBEDDING_PROVIDER", ""),
+            "state": index_state,
+        }
+    except Exception as e:
+        logger.error(f"Error getting index status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/reindex")
+async def reindex(request: ReindexRequest):
+    """
+    Backfill embeddings for existing articles so semantic search works.
+    Runs in a background thread.
+    """
+    global index_state
+    if index_state.get("running"):
+        return {"status": "running", "message": "Indexing is already running", "state": index_state}
+
+    from .database.db import SessionLocal
+    from .database.models import Article
+    from .services.embedding_service import EmbeddingService
+    from .services.vector_store import VectorStore
+    import threading
+
+    embedding_service = EmbeddingService()
+    vector_store = VectorStore()
+
+    if not getattr(embedding_service, "enabled", False):
+        return {
+            "status": "error",
+            "message": "Embeddings are disabled or unavailable (check EMBEDDING_PROVIDER and dependencies).",
+        }
+    if vector_store.get_collection_size() == 0:
+        # This is OK (empty collection), but make sure Chroma is actually usable
+        if getattr(vector_store, "collection", None) is None:
+            return {
+                "status": "error",
+                "message": "Vector store is unavailable (ChromaDB not installed or failed to initialize).",
+            }
+
+    def _run():
+        global index_state
+        index_state = {
+            "running": True,
+            "started_at": datetime.utcnow().isoformat(),
+            "finished_at": None,
+            "processed": 0,
+            "embedded": 0,
+            "failed": 0,
+            "last_error": None,
+        }
+
+        db = SessionLocal()
+        try:
+            q = db.query(Article).order_by(Article.published_date.desc())
+            if not request.force:
+                q = q.filter(Article.has_embedding == False)
+            if request.limit and request.limit > 0:
+                q = q.limit(request.limit)
+
+            batch_size = max(1, min(int(request.batch_size or 25), 200))
+            offset = 0
+
+            while True:
+                batch = q.offset(offset).limit(batch_size).all()
+                if not batch:
+                    break
+
+                for a in batch:
+                    index_state["processed"] += 1
+                    try:
+                        text = f"{a.title}\n\n{(a.content or '')[:3000]}"
+                        emb = embedding_service.generate_embedding(text)
+                        if not emb:
+                            index_state["failed"] += 1
+                            continue
+                        vector_id = f"article_{a.id}"
+                        meta = {"article_id": a.id, "title": a.title, "source": a.source, "url": a.url}
+                        if vector_store.add_article(vector_id, emb, meta):
+                            a.has_embedding = True
+                            a.embedding_id = vector_id
+                            index_state["embedded"] += 1
+                    except Exception as e:
+                        index_state["failed"] += 1
+                        index_state["last_error"] = str(e)
+
+                db.commit()
+                offset += batch_size
+
+        except Exception as e:
+            db.rollback()
+            index_state["last_error"] = str(e)
+        finally:
+            db.close()
+            index_state["running"] = False
+            index_state["finished_at"] = datetime.utcnow().isoformat()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Indexing started in background", "state": index_state}
 
 
 @app.get("/api/articles")
