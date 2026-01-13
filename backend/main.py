@@ -14,6 +14,7 @@ from datetime import datetime
 
 from .services.chat_service import ChatService
 from .scheduler import ScrapingScheduler
+from .services.text_chunker import chunk_text
 
 # Load .env early to ensure all services can access it
 from pathlib import Path
@@ -339,16 +340,51 @@ async def reindex(request: ReindexRequest):
                 for a in batch:
                     index_state["processed"] += 1
                     try:
-                        text = f"{a.title}\n\n{(a.content or '')[:3000]}"
-                        emb = embedding_service.generate_embedding(text)
-                        if not emb:
+                        if not getattr(embedding_service, "enabled", False):
                             index_state["failed"] += 1
                             continue
-                        vector_id = f"article_{a.id}"
-                        meta = {"article_id": a.id, "title": a.title, "source": a.source, "url": a.url}
-                        if vector_store.add_article(vector_id, emb, meta):
+
+                        max_chunks = int(os.getenv("MAX_EMBED_CHUNKS_PER_ARTICLE", "8") or "8")
+                        chunk_size = int(os.getenv("EMBED_CHUNK_MAX_CHARS", "1200") or "1200")
+                        chunk_overlap = int(os.getenv("EMBED_CHUNK_OVERLAP_CHARS", "200") or "200")
+
+                        base_text = f"{a.title}\n\n{(a.content or '')}"
+                        chunks = chunk_text(
+                            base_text,
+                            max_chars=chunk_size,
+                            overlap_chars=chunk_overlap,
+                            max_chunks=max_chunks,
+                        )
+                        if not chunks:
+                            index_state["failed"] += 1
+                            continue
+
+                        embeddings = embedding_service.generate_embeddings_batch(chunks)
+                        ids = []
+                        embs = []
+                        metas = []
+                        docs = []
+                        published_iso = a.published_date.isoformat() if a.published_date else None
+                        for idx, (ch, emb) in enumerate(zip(chunks, embeddings)):
+                            if not emb:
+                                continue
+                            ids.append(f"article_{a.id}_chunk_{idx}")
+                            embs.append(emb)
+                            docs.append(ch)
+                            metas.append({
+                                "article_id": a.id,
+                                "chunk_index": idx,
+                                "chunk_total": len(chunks),
+                                "title": a.title,
+                                "source": a.source,
+                                "source_type": a.source_type,
+                                "url": a.url,
+                                "published_date": published_iso,
+                            })
+
+                        if ids and vector_store.add_articles_batch(ids, embs, metas, documents=docs):
                             a.has_embedding = True
-                            a.embedding_id = vector_id
+                            a.embedding_id = f"article_{a.id}"
                             index_state["embedded"] += 1
                     except Exception as e:
                         index_state["failed"] += 1

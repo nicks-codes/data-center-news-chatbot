@@ -18,6 +18,7 @@ from .database.models import Article
 from .database.db import SessionLocal, init_db
 from .services.embedding_service import EmbeddingService
 from .services.vector_store import VectorStore
+from .services.text_chunker import chunk_text
 
 logger = logging.getLogger(__name__)
 
@@ -140,32 +141,69 @@ class ScrapingScheduler:
             db.commit()
             logger.info(f"Stored {len(db_articles)} articles in database")
             
-            # Generate embeddings and store in vector DB
-            articles_to_embed = []
-            for db_article in db_articles:
-                # Create embedding text (title + content)
-                embedding_text = f"{db_article.title}\n\n{db_article.content[:3000]}"
-                embedding = self.embedding_service.generate_embedding(embedding_text)
-                
-                if embedding:
-                    # Use article ID from database
-                    vector_id = f"article_{db_article.id}"
-                    
-                    metadata = {
-                        'article_id': db_article.id,
-                        'title': db_article.title,
-                        'source': db_article.source,
-                        'url': db_article.url,
-                    }
-                    
-                    if self.vector_store.add_article(vector_id, embedding, metadata):
-                        db_article.has_embedding = True
-                        db_article.embedding_id = vector_id
-                        articles_to_embed.append(db_article)
-            
-            if articles_to_embed:
-                db.commit()
-                logger.info(f"Generated embeddings for {len(articles_to_embed)} articles")
+            # Generate embeddings and store in vector DB (chunked for better retrieval)
+            if getattr(self.embedding_service, "enabled", False) and getattr(self.vector_store, "collection", None) is not None:
+                max_chunks = int(os.getenv("MAX_EMBED_CHUNKS_PER_ARTICLE", "8") or "8")
+                chunk_size = int(os.getenv("EMBED_CHUNK_MAX_CHARS", "1200") or "1200")
+                chunk_overlap = int(os.getenv("EMBED_CHUNK_OVERLAP_CHARS", "200") or "200")
+
+                vector_ids = []
+                texts = []
+                metadatas = []
+                documents = []
+
+                for db_article in db_articles:
+                    base_text = f"{db_article.title}\n\n{(db_article.content or '')}"
+                    chunks = chunk_text(
+                        base_text,
+                        max_chars=chunk_size,
+                        overlap_chars=chunk_overlap,
+                        max_chunks=max_chunks,
+                    )
+                    if not chunks:
+                        continue
+
+                    published_iso = db_article.published_date.isoformat() if db_article.published_date else None
+                    for idx, ch in enumerate(chunks):
+                        vector_ids.append(f"article_{db_article.id}_chunk_{idx}")
+                        texts.append(ch)
+                        documents.append(ch)
+                        metadatas.append({
+                            "article_id": db_article.id,
+                            "chunk_index": idx,
+                            "chunk_total": len(chunks),
+                            "title": db_article.title,
+                            "source": db_article.source,
+                            "source_type": db_article.source_type,
+                            "url": db_article.url,
+                            "published_date": published_iso,
+                        })
+
+                if vector_ids:
+                    embeddings = self.embedding_service.generate_embeddings_batch(texts)
+                    # Filter out failures to keep batch lengths aligned
+                    ok_ids = []
+                    ok_embs = []
+                    ok_metas = []
+                    ok_docs = []
+                    for vid, emb, meta, doc in zip(vector_ids, embeddings, metadatas, documents):
+                        if emb:
+                            ok_ids.append(vid)
+                            ok_embs.append(emb)
+                            ok_metas.append(meta)
+                            ok_docs.append(doc)
+
+                    if ok_ids and self.vector_store.add_articles_batch(ok_ids, ok_embs, ok_metas, documents=ok_docs):
+                        # Mark each DB article as embedded if at least one chunk was stored
+                        embedded_article_ids = {m["article_id"] for m in ok_metas if "article_id" in m}
+                        embedded_count = 0
+                        for db_article in db_articles:
+                            if db_article.id in embedded_article_ids:
+                                db_article.has_embedding = True
+                                db_article.embedding_id = f"article_{db_article.id}"
+                                embedded_count += 1
+                        db.commit()
+                        logger.info(f"Generated chunked embeddings for {embedded_count} articles")
             
         except Exception as e:
             logger.error(f"Error processing articles: {e}")
@@ -212,9 +250,9 @@ class ScrapingScheduler:
             
             # Remove from vector store
             for article in old_articles:
-                if article.embedding_id:
+                if article.id:
                     try:
-                        self.vector_store.delete_article(article.embedding_id)
+                        self.vector_store.delete_by_article_id(article.id)
                     except Exception as e:
                         logger.warning(f"Could not delete embedding for article {article.id}: {e}")
             

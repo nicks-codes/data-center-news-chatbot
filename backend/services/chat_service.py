@@ -111,27 +111,42 @@ class ChatService:
                 
                 for article_data in similar_articles:
                     metadata = article_data.get('metadata', {})
-                    article_id = metadata.get('article_id')
-                    vector_id = article_data.get('id')
-                    
-                    article = None
-                    if article_id:
-                        article = db.query(Article).filter(Article.id == article_id).first()
-                    
-                    if not article and vector_id:
-                        article = db.query(Article).filter(Article.embedding_id == vector_id).first()
-                    
-                    if article:
-                        if not self._looks_like_datacenter_article(article.title or "", article.content or ""):
-                            continue
-                        articles.append({
-                            'title': article.title,
-                            'content': article.content,
-                            'url': article.url,
-                            'source': article.source,
-                            'source_type': article.source_type,
-                            'published_date': article.published_date.isoformat() if article.published_date else None,
-                        })
+                    doc = article_data.get("document") or ""
+
+                    # Prefer metadata (chunked indexing stores full provenance); fall back to DB lookup if needed.
+                    title = metadata.get("title") or ""
+                    url = metadata.get("url") or ""
+                    source = metadata.get("source") or ""
+                    source_type = metadata.get("source_type") or ""
+                    published_date = metadata.get("published_date")
+
+                    if not title or not url:
+                        article_id = metadata.get('article_id')
+                        if article_id:
+                            article = db.query(Article).filter(Article.id == article_id).first()
+                            if article:
+                                title = title or (article.title or "")
+                                url = url or (article.url or "")
+                                source = source or (article.source or "")
+                                source_type = source_type or (article.source_type or "")
+                                published_date = published_date or (article.published_date.isoformat() if article.published_date else None)
+                                if not doc:
+                                    doc = (article.content or "")[:2000]
+
+                    if not title or not url:
+                        continue
+
+                    if not self._looks_like_datacenter_article(title, doc):
+                        continue
+
+                    articles.append({
+                        'title': title,
+                        'content': doc[:2000],
+                        'url': url,
+                        'source': source,
+                        'source_type': source_type,
+                        'published_date': published_date,
+                    })
             
             # Fallback to keyword search if no semantic results
             if not articles:

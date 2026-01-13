@@ -78,10 +78,11 @@ class EmbeddingService:
         try:
             # Use local Sentence Transformers model (free)
             if self.local_model:
-                # Truncate text if too long
-                max_length = 512  # Sentence Transformers limit
-                if len(text) > max_length:
-                    text = text[:max_length]
+                # Avoid aggressive char truncation; the model will handle token-level truncation internally.
+                # We still apply a generous guardrail to prevent pathological inputs.
+                max_chars = int(os.getenv("EMBED_MAX_INPUT_CHARS", "4000") or "4000")
+                if max_chars > 0 and len(text) > max_chars:
+                    text = text[:max_chars]
                 embedding = self.local_model.encode(text, convert_to_numpy=True).tolist()
                 return embedding
             
@@ -122,10 +123,10 @@ class EmbeddingService:
         # Use local Sentence Transformers model (free)
         if self.local_model:
             try:
-                # Truncate texts if too long
-                max_length = 512
-                truncated_texts = [text[:max_length] if len(text) > max_length else text for text in texts]
-                batch_embeddings = self.local_model.encode(truncated_texts, convert_to_numpy=True).tolist()
+                max_chars = int(os.getenv("EMBED_MAX_INPUT_CHARS", "4000") or "4000")
+                if max_chars > 0:
+                    texts = [t[:max_chars] if len(t) > max_chars else t for t in texts]
+                batch_embeddings = self.local_model.encode(texts, convert_to_numpy=True).tolist()
                 return batch_embeddings
             except Exception as e:
                 logger.error(f"Error generating batch embeddings with Sentence Transformers: {e}")

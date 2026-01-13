@@ -37,7 +37,7 @@ class VectorStore:
         )
         logger.info(f"ChromaDB initialized at {persist_directory}")
     
-    def add_article(self, article_id: str, embedding: List[float], metadata: Dict) -> bool:
+    def add_article(self, article_id: str, embedding: List[float], metadata: Dict, document: Optional[str] = None) -> bool:
         """Add an article embedding to the vector store"""
         if not CHROMADB_AVAILABLE or not self.collection:
             logger.warning("ChromaDB not available, cannot add article")
@@ -46,15 +46,27 @@ class VectorStore:
             # Use upsert when available to make indexing idempotent
             upsert = getattr(self.collection, "upsert", None)
             if callable(upsert):
-                upsert(ids=[article_id], embeddings=[embedding], metadatas=[metadata])
+                if document is not None:
+                    upsert(ids=[article_id], embeddings=[embedding], metadatas=[metadata], documents=[document])
+                else:
+                    upsert(ids=[article_id], embeddings=[embedding], metadatas=[metadata])
             else:
-                self.collection.add(ids=[article_id], embeddings=[embedding], metadatas=[metadata])
+                if document is not None:
+                    self.collection.add(ids=[article_id], embeddings=[embedding], metadatas=[metadata], documents=[document])
+                else:
+                    self.collection.add(ids=[article_id], embeddings=[embedding], metadatas=[metadata])
             return True
         except Exception as e:
             logger.error(f"Error adding article to vector store: {e}")
             return False
     
-    def add_articles_batch(self, article_ids: List[str], embeddings: List[List[float]], metadatas: List[Dict]) -> bool:
+    def add_articles_batch(
+        self,
+        article_ids: List[str],
+        embeddings: List[List[float]],
+        metadatas: List[Dict],
+        documents: Optional[List[str]] = None,
+    ) -> bool:
         """Add multiple articles to the vector store"""
         if not CHROMADB_AVAILABLE or not self.collection:
             logger.warning("ChromaDB not available, cannot add articles")
@@ -62,9 +74,15 @@ class VectorStore:
         try:
             upsert = getattr(self.collection, "upsert", None)
             if callable(upsert):
-                upsert(ids=article_ids, embeddings=embeddings, metadatas=metadatas)
+                if documents is not None:
+                    upsert(ids=article_ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+                else:
+                    upsert(ids=article_ids, embeddings=embeddings, metadatas=metadatas)
             else:
-                self.collection.add(ids=article_ids, embeddings=embeddings, metadatas=metadatas)
+                if documents is not None:
+                    self.collection.add(ids=article_ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+                else:
+                    self.collection.add(ids=article_ids, embeddings=embeddings, metadatas=metadatas)
             return True
         except Exception as e:
             logger.error(f"Error adding articles batch to vector store: {e}")
@@ -76,10 +94,18 @@ class VectorStore:
             logger.warning("ChromaDB not available, cannot search")
             return []
         try:
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results
-            )
+            try:
+                results = self.collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=n_results,
+                    include=["metadatas", "distances", "documents"],
+                )
+            except TypeError:
+                # Older Chroma versions don't support include
+                results = self.collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=n_results,
+                )
             
             # Format results
             articles = []
@@ -88,7 +114,8 @@ class VectorStore:
                     article = {
                         'id': results['ids'][0][i],
                         'metadata': results['metadatas'][0][i],
-                        'distance': results['distances'][0][i] if 'distances' in results else None
+                        'distance': results['distances'][0][i] if 'distances' in results else None,
+                        'document': (results.get('documents') or [[None]])[0][i] if 'documents' in results else None,
                     }
                     articles.append(article)
             
@@ -106,6 +133,18 @@ class VectorStore:
             return True
         except Exception as e:
             logger.error(f"Error deleting article from vector store: {e}")
+            return False
+
+    def delete_by_article_id(self, article_id: int) -> bool:
+        """Delete all vectors associated with a given DB article id (chunked indexing)."""
+        if not CHROMADB_AVAILABLE or not self.collection:
+            return False
+        try:
+            # Preferred: delete via metadata filter (works even when chunk IDs vary)
+            self.collection.delete(where={"article_id": int(article_id)})
+            return True
+        except Exception as e:
+            logger.warning(f"Error deleting vectors for article_id={article_id}: {e}")
             return False
     
     def get_collection_size(self) -> int:
