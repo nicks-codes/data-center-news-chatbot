@@ -157,8 +157,19 @@ class ChatService:
     def generate_response(self, query: str, context_articles: List[Dict]) -> Dict:
         """Generate AI response using retrieved context"""
         if not self.enabled:
+            provider = (os.getenv("AI_PROVIDER", "groq") or "groq").lower()
+            help_lines = [
+                "The AI service isn't configured yet.",
+                "",
+                "To enable chat, set one of these environment variables:",
+                "- GROQ_API_KEY (recommended free tier) + AI_PROVIDER=groq",
+                "- TOGETHER_API_KEY + AI_PROVIDER=together",
+                "- OPENAI_API_KEY + AI_PROVIDER=openai",
+                "",
+                f"Current AI_PROVIDER: {provider}",
+            ]
             return {
-                'answer': "Sorry, the AI service is not available. Please configure your OpenAI API key.",
+                'answer': "\n".join(help_lines),
                 'sources': []
             }
         
