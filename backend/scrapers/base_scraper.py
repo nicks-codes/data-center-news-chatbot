@@ -83,6 +83,10 @@ class BaseScraper(ABC):
         text = f"{title} {content}".lower()
         score = 0.0
         matches = 0
+        high_matches = 0
+        medium_matches = 0
+        company_matches = 0
+        tech_matches = 0
         
         # Check for exclusion keywords first
         if self.exclude_pattern.search(text):
@@ -93,24 +97,33 @@ class BaseScraper(ABC):
             if keyword in text:
                 score += 0.4
                 matches += 1
+                high_matches += 1
         
         # Medium weight keywords (0.2 per match)
         for keyword in DC_RELEVANCE_KEYWORDS['medium']:
             if keyword in text:
                 score += 0.2
                 matches += 1
+                medium_matches += 1
         
         # Company names (0.3 per match)
         for keyword in DC_RELEVANCE_KEYWORDS['companies']:
             if keyword in text:
                 score += 0.3
                 matches += 1
+                company_matches += 1
         
         # Tech keywords (0.1 per match)
         for keyword in DC_RELEVANCE_KEYWORDS['tech']:
             if keyword in text:
                 score += 0.1
                 matches += 1
+                tech_matches += 1
+        
+        # Guardrail: if an article only matches generic "tech" terms, it's probably not DC news.
+        # This prevents consumer-tech content (e.g. routers, TVs) from slipping in.
+        if high_matches == 0 and medium_matches == 0 and company_matches == 0 and tech_matches > 0:
+            score = min(score, 0.1)
         
         # Normalize score to 0-1 range
         return min(1.0, score)

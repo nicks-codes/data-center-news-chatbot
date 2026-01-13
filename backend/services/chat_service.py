@@ -139,9 +139,19 @@ class ChatService:
                 stop = {
                     "the","a","an","and","or","to","of","in","on","for","with","about","latest",
                     "what","which","who","how","are","is","was","were","be","been","from",
-                    "data","center","centers","datacenter","news"
+                    "data","center","centers","datacenter","news",
+                    # super-ambiguous terms that cause terrible matches
+                    "site","sites","being"
                 }
                 query_words = [t for t in tokens if t not in stop and len(t) > 2]
+                
+                location_terms = self._location_terms(query_lower)
+                if location_terms:
+                    # add location hints as tokens (including common expansions)
+                    for t in location_terms:
+                        for part in re.findall(r"[a-z0-9]+", t.lower()):
+                            if part and part not in stop:
+                                query_words.append(part)
                 
                 # Intent expansion for common asks (construction/projects)
                 construction_terms = {
@@ -172,6 +182,13 @@ class ChatService:
                     if any(k in title_lower for k in ["mw", "megawatt", "data center", "datacenter", "campus", "build", "proposed", "planned", "break ground"]):
                         score += 2
                     
+                    # If the query asks about a location, strongly prefer articles that mention it.
+                    if location_terms:
+                        if any(t in title_lower or t in content_lower for t in location_terms):
+                            score += 15
+                        else:
+                            score -= 8
+                    
                     if score > 0:
                         articles.append({
                             'title': article.title,
@@ -194,6 +211,117 @@ class ChatService:
             db.close()
         
         return articles
+
+    def _location_terms(self, query_lower: str) -> List[str]:
+        """
+        Map common location shorthand to useful match terms.
+        Keep this intentionally small and high-signal.
+        """
+        terms: List[str] = []
+        if "dfw" in query_lower or "dallas" in query_lower or "fort worth" in query_lower:
+            terms.extend([
+                "dfw",
+                "dallas",
+                "fort worth",
+                "dallas-fort worth",
+                "dallas fort worth",
+                "north texas",
+                "texas",
+                "tx",
+                "irving",
+                "plano",
+                "allen",
+                "frisco",
+            ])
+        return terms
+
+    def _store_articles(self, normalized_articles: List[Dict]) -> int:
+        """Insert new articles into DB (best-effort, URL-unique). Returns count inserted."""
+        if not normalized_articles:
+            return 0
+        db = SessionLocal()
+        inserted = 0
+        try:
+            for a in normalized_articles:
+                try:
+                    exists = db.query(Article).filter(Article.url == a.get("url")).first()
+                    if exists:
+                        continue
+                    db.add(Article(
+                        title=a["title"],
+                        content=a.get("content") or "",
+                        url=a["url"],
+                        source=a.get("source") or "",
+                        source_type=a.get("source_type") or "unknown",
+                        published_date=a.get("published_date"),
+                        author=a.get("author"),
+                        tags=a.get("tags"),
+                        has_embedding=False,
+                        embedding_id=None,
+                    ))
+                    inserted += 1
+                except Exception:
+                    continue
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+        return inserted
+
+    def _proactive_fetch(self, query: str) -> int:
+        """
+        If we don't have good local matches, pull a small set of fresh, query-specific items
+        (Baxtel RSS + Google News) and store them, so the next retrieval has something real.
+        """
+        query_lower = query.lower()
+        location_terms = self._location_terms(query_lower)
+        inserted_total = 0
+
+        # 1) Baxtel RSS (very high-signal for projects)
+        try:
+            from ..scrapers.rss_scraper import RSSScraper
+            rss = RSSScraper()
+            raw = rss.parse_feed("https://baxtel.com/news.rss", "Baxtel News")
+            normalized = []
+            for a in raw:
+                title = (a.get("title") or "").lower()
+                content = (a.get("content") or "").lower()
+                if location_terms and not any(t in title or t in content for t in location_terms):
+                    continue
+                n = rss.normalize_article(a)
+                if n:
+                    normalized.append(n)
+            inserted_total += self._store_articles(normalized)
+        except Exception as e:
+            logger.debug(f"Proactive Baxtel fetch failed: {e}")
+
+        # 2) Google News targeted queries (small + focused)
+        try:
+            from ..scrapers.google_news_scraper import GoogleNewsScraper
+            g = GoogleNewsScraper()
+            q_variants = []
+            if location_terms:
+                # Prefer explicit city strings over abbreviation
+                q_variants.extend([
+                    "Dallas Fort Worth data center construction",
+                    "Dallas data center campus MW",
+                    "Fort Worth data center proposed",
+                ])
+            else:
+                q_variants.append(query)
+
+            normalized = []
+            for q in q_variants[:3]:
+                for a in g.search_google_news(q, limit=12):
+                    n = g.normalize_article(a)
+                    if n:
+                        normalized.append(n)
+            inserted_total += self._store_articles(normalized)
+        except Exception as e:
+            logger.debug(f"Proactive Google News fetch failed: {e}")
+
+        return inserted_total
     
     def generate_response(self, query: str, context_articles: List[Dict]) -> Dict:
         """Generate AI response using retrieved context"""
@@ -318,7 +446,21 @@ Provide a clear, informative answer based on these sources. Include specific det
             db.close()
         
         # Retrieve relevant articles
-        articles = self.retrieve_relevant_articles(query, n_results=5)
+        articles = self.retrieve_relevant_articles(query, n_results=8)
+        
+        # Proactive fallback: if it's a location question and we didn't retrieve any location hits,
+        # try to fetch a few fresh, location-specific items and re-run retrieval once.
+        query_lower = query.lower()
+        loc_terms = self._location_terms(query_lower)
+        if loc_terms:
+            have_loc = any(
+                any(t in (a.get("title","").lower() + " " + a.get("content","").lower()) for t in loc_terms)
+                for a in articles
+            )
+            if not have_loc:
+                inserted = self._proactive_fetch(query)
+                if inserted > 0:
+                    articles = self.retrieve_relevant_articles(query, n_results=8)
         
         if not articles:
             return {
