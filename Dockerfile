@@ -35,8 +35,12 @@ ENV DATABASE_URL=sqlite:///./data/datacenter_news.db \
     EMBEDDING_PROVIDER=none \
     AI_PROVIDER=groq
 
+# Copy and setup start script
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
 # Expose port
 EXPOSE 8000
 
-# Run FastAPI (uses PORT env var for Railway/Render)
-CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run FastAPI via start script (handles PORT env var)
+CMD ["/start.sh"]
