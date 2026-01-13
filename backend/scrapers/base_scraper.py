@@ -245,15 +245,15 @@ class BaseScraper(ABC):
             # Skip very old articles (configurable)
             #
             # MAX_ARTICLE_AGE_DAYS:
-            # - default: 30
+            # - default: 90
             # - set to 0 to disable age filtering
-            max_age_days = 30
+            max_age_days = 90
             try:
-                max_age_days = int(os.getenv("MAX_ARTICLE_AGE_DAYS", "30"))
+                max_age_days = int(os.getenv("MAX_ARTICLE_AGE_DAYS", "90"))
             except ValueError:
-                max_age_days = 30
+                max_age_days = 90
             if max_age_days < 0:
-                max_age_days = 30
+                max_age_days = 90
             
             if published_date and max_age_days > 0:
                 age = datetime.now() - published_date

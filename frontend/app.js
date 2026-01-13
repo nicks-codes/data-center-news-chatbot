@@ -73,10 +73,19 @@ async function fetchStats() {
         const data = await response.json();
         
         totalArticles.textContent = data.total_articles || 0;
-        indexedArticles.textContent = data.articles_with_embeddings || 0;
+        // In lightweight mode, embeddings are disabled and "Indexed" would always show 0.
+        // Show a clearer indicator instead of implying something is broken.
+        if ((data.embedding_provider || '').toLowerCase() === 'none') {
+            indexedArticles.textContent = '—';
+        } else {
+            indexedArticles.textContent = data.articles_with_embeddings || 0;
+        }
         
-        if (data.is_free) {
-            providerInfo.textContent = '✅ Using free AI providers';
+        if ((data.embedding_provider || '').toLowerCase() === 'none') {
+            providerInfo.textContent = `Provider: ${data.ai_provider || 'unknown'} (keyword mode)`;
+            providerInfo.classList.remove('free');
+        } else if (data.is_free) {
+            providerInfo.textContent = '✅ Using free AI providers + embeddings';
             providerInfo.classList.add('free');
         } else {
             providerInfo.textContent = `Provider: ${data.ai_provider || 'unknown'}`;

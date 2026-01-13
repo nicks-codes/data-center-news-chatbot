@@ -16,6 +16,7 @@ from .vector_store import VectorStore
 from .cost_tracker import CostTracker
 from ..database.models import Article
 from ..database.db import SessionLocal
+from ..scrapers.base_scraper import DC_RELEVANCE_KEYWORDS, EXCLUDE_KEYWORDS
 
 # Load .env from multiple possible locations
 env_paths = [
@@ -121,6 +122,8 @@ class ChatService:
                         article = db.query(Article).filter(Article.embedding_id == vector_id).first()
                     
                     if article:
+                        if not self._looks_like_datacenter_article(article.title or "", article.content or ""):
+                            continue
                         articles.append({
                             'title': article.title,
                             'content': article.content,
@@ -168,6 +171,9 @@ class ChatService:
                 for article in candidates:
                     title_lower = (article.title or "").lower()
                     content_lower = (article.content or "").lower()
+
+                    if not self._looks_like_datacenter_article(article.title or "", article.content or ""):
+                        continue
                     
                     score = 0
                     for word in query_words:
@@ -232,8 +238,42 @@ class ChatService:
                 "plano",
                 "allen",
                 "frisco",
+                "lancaster",
+                "red oak",
+                "mesquite",
+                "garland",
+                "arlington",
+                "grand prairie",
             ])
         return terms
+
+    def _looks_like_datacenter_article(self, title: str, content: str) -> bool:
+        """
+        Hard filter to prevent consumer-tech / parenting / gadget content from being used as context.
+        Uses the same keyword sets as the scrapers, but as an allowlist-style guardrail.
+        """
+        t = f"{title} {content}".lower()
+        if any(x in t for x in EXCLUDE_KEYWORDS):
+            return False
+
+        core = DC_RELEVANCE_KEYWORDS["high"]
+        medium = DC_RELEVANCE_KEYWORDS["medium"]
+        companies = DC_RELEVANCE_KEYWORDS["companies"]
+
+        # Require at least one strong signal, or two medium signals
+        if any(k in t for k in core):
+            return True
+        if any(k in t for k in companies):
+            return True
+        medium_hits = sum(1 for k in medium if k in t)
+        if medium_hits >= 2:
+            return True
+
+        # Extra lightweight signals commonly present in construction/project coverage
+        if any(k in t for k in ["mw", "megawatt", "substation", "power capacity", "data centre", "datacentre"]):
+            return True
+
+        return False
 
     def _store_articles(self, normalized_articles: List[Dict]) -> int:
         """Insert new articles into DB (best-effort, URL-unique). Returns count inserted."""
@@ -307,6 +347,9 @@ class ChatService:
                     "Dallas Fort Worth data center construction",
                     "Dallas data center campus MW",
                     "Fort Worth data center proposed",
+                    "Irving TX data center campus",
+                    "Plano TX data center development",
+                    "Lancaster TX data center",
                 ])
             else:
                 q_variants.append(query)
