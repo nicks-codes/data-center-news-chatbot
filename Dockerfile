@@ -1,7 +1,7 @@
-# Multi-stage Dockerfile for Data Center News Chatbot
-# Supports both FastAPI backend and Streamlit frontend
+# Lightweight Dockerfile for Data Center News Chatbot
+# Optimized for Railway/Render free tier (< 4GB image size)
 
-FROM python:3.11-slim as base
+FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -9,21 +9,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Install minimal system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Create app directory
 WORKDIR /app
 
-# Copy requirements first for better caching
-COPY backend/requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir streamlit gunicorn
+# Copy and install lightweight requirements
+COPY backend/requirements-light.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY backend/ ./backend/
@@ -32,36 +29,14 @@ COPY frontend/ ./frontend/
 # Create necessary directories
 RUN mkdir -p /app/data /app/chroma_db
 
-# Set environment defaults
+# Set environment defaults (uses Groq for AI, chromadb without heavy embeddings)
 ENV DATABASE_URL=sqlite:///./data/datacenter_news.db \
     CHROMA_DB_PATH=/app/chroma_db \
-    EMBEDDING_PROVIDER=sentence-transformers \
+    EMBEDDING_PROVIDER=none \
     AI_PROVIDER=groq
 
-# Expose ports
-EXPOSE 8000 8501
-
-# Default command runs FastAPI (uses PORT env var for Railway/Render compatibility)
-CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
-
-
-# ============================================
-# Alternative targets for different deployments
-# ============================================
-
-# Target: FastAPI only
-FROM base as fastapi
+# Expose port
 EXPOSE 8000
-CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
-# Target: Streamlit only
-FROM base as streamlit
-WORKDIR /app/backend
-EXPOSE 8501
-ENV API_URL=http://localhost:8000
-CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
-
-# Target: Both services (for development)
-FROM base as full
-EXPOSE 8000 8501
+# Run FastAPI (uses PORT env var for Railway/Render)
 CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
