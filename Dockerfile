@@ -1,5 +1,6 @@
 # Lightweight Dockerfile for Data Center News Chatbot
 # Optimized for Railway/Render free tier (< 4GB image size)
+# v2 - Fixed PORT handling
 
 FROM python:3.11-slim
 
