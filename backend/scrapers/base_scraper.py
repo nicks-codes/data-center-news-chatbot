@@ -24,6 +24,43 @@ class BaseScraper(ABC):
     def normalize_article(self, raw_article: Dict) -> Optional[Dict]:
         """Normalize article data to common format"""
         try:
+            def _clean_str(value: object) -> str:
+                if value is None:
+                    return ""
+                return str(value).strip()
+
+            def _normalize_tags(value: object) -> Optional[str]:
+                """
+                Normalize tags into a comma-separated string.
+                Accepts None, str, list/tuple/set.
+                """
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    tag_str = value.strip()
+                    return tag_str or None
+                if isinstance(value, (list, tuple, set)):
+                    parts = []
+                    for item in value:
+                        s = _clean_str(item)
+                        if s:
+                            parts.append(s)
+                    if not parts:
+                        return None
+                    # Deduplicate while preserving order
+                    seen = set()
+                    deduped = []
+                    for p in parts:
+                        key = p.lower()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        deduped.append(p)
+                    return ", ".join(deduped)
+                # Fallback: stringify
+                s = _clean_str(value)
+                return s or None
+
             # Parse published date
             published_date = None
             if raw_article.get('published_date'):
@@ -43,15 +80,19 @@ class BaseScraper(ABC):
                 raw_article.get('title', '')
             )
             
+            # Preserve per-article "source" (site/subreddit/query) if provided.
+            # Fall back to the scraper's name if missing.
+            source = _clean_str(raw_article.get('source')) or self.source_name
+
             normalized = {
-                'title': raw_article.get('title', '').strip(),
-                'content': raw_article.get('content', '').strip(),
-                'url': raw_article.get('url', '').strip(),
-                'source': self.source_name,
+                'title': _clean_str(raw_article.get('title')),
+                'content': _clean_str(raw_article.get('content')),
+                'url': _clean_str(raw_article.get('url')),
+                'source': source,
                 'source_type': self.get_source_type(),
                 'published_date': published_date,
-                'author': raw_article.get('author', '').strip() or None,
-                'tags': raw_article.get('tags', ''),
+                'author': _clean_str(raw_article.get('author')) or None,
+                'tags': _normalize_tags(raw_article.get('tags')),
                 'article_id': article_id
             }
             
