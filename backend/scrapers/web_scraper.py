@@ -97,6 +97,36 @@ class WebScraper(BaseScraper):
         super().__init__("Web Scraper")
         self.sources = WEB_SOURCES
         self.headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        self.session = self._build_session()
+    
+    def _build_session(self) -> requests.Session:
+        """Requests session with sane retries/timeouts."""
+        session = requests.Session()
+        try:
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            retry = Retry(
+                total=3,
+                connect=3,
+                read=3,
+                backoff_factor=0.5,
+                status_forcelist=(429, 500, 502, 503, 504),
+                allowed_methods=("GET", "HEAD"),
+                raise_on_status=False,
+            )
+            adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+        except Exception:
+            # Fall back to plain session if retry wiring fails for any reason.
+            pass
+        return session
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
@@ -283,6 +313,10 @@ class WebScraper(BaseScraper):
             return None
         
         try:
+            response = self.session.get(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
             soup = BeautifulSoup(content, 'html.parser')
             
             # Extract title - prefer og:title, then h1, then title tag
@@ -344,6 +378,8 @@ class WebScraper(BaseScraper):
             return []
         
         try:
+            response = self.session.get(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
             soup = BeautifulSoup(content, 'html.parser')
             
             # Use custom selector if provided

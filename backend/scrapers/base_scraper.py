@@ -178,6 +178,43 @@ class BaseScraper(ABC):
     def normalize_article(self, raw_article: Dict) -> Optional[Dict]:
         """Normalize article data to common format with validation"""
         try:
+            def _clean_str(value: object) -> str:
+                if value is None:
+                    return ""
+                return str(value).strip()
+
+            def _normalize_tags(value: object) -> Optional[str]:
+                """
+                Normalize tags into a comma-separated string.
+                Accepts None, str, list/tuple/set.
+                """
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    tag_str = value.strip()
+                    return tag_str or None
+                if isinstance(value, (list, tuple, set)):
+                    parts = []
+                    for item in value:
+                        s = _clean_str(item)
+                        if s:
+                            parts.append(s)
+                    if not parts:
+                        return None
+                    # Deduplicate while preserving order
+                    seen = set()
+                    deduped = []
+                    for p in parts:
+                        key = p.lower()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        deduped.append(p)
+                    return ", ".join(deduped)
+                # Fallback: stringify
+                s = _clean_str(value)
+                return s or None
+
             title = self.clean_text(raw_article.get('title', ''))
             content = self.clean_text(raw_article.get('content', ''))
             url = raw_article.get('url', '').strip()
@@ -216,7 +253,19 @@ class BaseScraper(ABC):
             # Use source from article if provided, otherwise use scraper source
             source = raw_article.get('source', '').strip() or self.source_name
             
+            # Preserve per-article "source" (site/subreddit/query) if provided.
+            # Fall back to the scraper's name if missing.
+            source = _clean_str(raw_article.get('source')) or self.source_name
+
             normalized = {
+                'title': _clean_str(raw_article.get('title')),
+                'content': _clean_str(raw_article.get('content')),
+                'url': _clean_str(raw_article.get('url')),
+                'source': source,
+                'source_type': self.get_source_type(),
+                'published_date': published_date,
+                'author': _clean_str(raw_article.get('author')) or None,
+                'tags': _normalize_tags(raw_article.get('tags')),
                 'title': title[:500],  # Limit title length
                 'content': content[:10000],  # Limit content length
                 'url': url[:1000],  # Limit URL length
