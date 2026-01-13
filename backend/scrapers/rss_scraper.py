@@ -7,6 +7,8 @@ from datetime import datetime
 import logging
 import time
 import requests
+import re
+from bs4 import BeautifulSoup
 from .base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,7 @@ RSS_FEEDS = [
         'url': 'https://baxtel.com/news.rss',
         'priority': 1,
         'max_entries': 200,
+        'fetch_full_content': True,
     },
     # Industry Publications
     {
@@ -153,7 +156,6 @@ class RSSScraper(BaseScraper):
     
     def clean_html(self, html_content: str) -> str:
         """Remove HTML tags and clean up content"""
-        import re
         # Remove HTML tags
         clean = re.sub(r'<[^>]+>', ' ', html_content)
         # Remove extra whitespace
@@ -161,6 +163,61 @@ class RSSScraper(BaseScraper):
         # Remove HTML entities
         clean = re.sub(r'&[a-zA-Z]+;', ' ', clean)
         return clean.strip()
+    
+    def extract_full_article_text(self, url: str) -> str:
+        """Fetch and extract readable text from an article URL (best-effort)."""
+        try:
+            resp = requests.get(
+                url,
+                headers={
+                    **self.headers,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+                timeout=self.timeout,
+                allow_redirects=True,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            self.logger.debug(f"Could not fetch full article content for {url}: {e}")
+            return ""
+        
+        try:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            
+            # Remove noisy elements
+            for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]):
+                element.decompose()
+            for element in soup.find_all(class_=re.compile(r'(ad|advertisement|tracking|sidebar|menu|nav|footer|header|comment)', re.I)):
+                element.decompose()
+            
+            content_selectors = [
+                ("article", {}),
+                ("main", {}),
+                ("div", {"class": re.compile(r'(article|post|content|entry|story)[-_]?(body|content|text)?', re.I)}),
+                ("div", {"id": re.compile(r'(article|post|content|entry|story)', re.I)}),
+            ]
+            
+            main_content = None
+            for tag, attrs in content_selectors:
+                main_content = soup.find(tag, attrs)
+                if main_content:
+                    break
+            
+            if main_content:
+                paragraphs = main_content.find_all("p")
+                if paragraphs:
+                    text = " ".join(p.get_text(strip=True) for p in paragraphs)
+                else:
+                    text = main_content.get_text(separator=" ", strip=True)
+            else:
+                body = soup.find("body")
+                text = body.get_text(separator=" ", strip=True) if body else soup.get_text(separator=" ", strip=True)
+            
+            text = re.sub(r"\s+", " ", text).strip()
+            return text[:8000]
+        except Exception as e:
+            self.logger.debug(f"Could not parse full article content for {url}: {e}")
+            return ""
     
     def parse_feed(self, feed_url: str, feed_name: str) -> List[Dict]:
         """Parse a single RSS feed"""
@@ -192,6 +249,12 @@ class RSSScraper(BaseScraper):
             if isinstance(max_entries, int) and max_entries > 0:
                 entries = entries[:max_entries]
             
+            fetch_full = False
+            for f in self.feeds:
+                if f.get('name') == feed_name and f.get('url') == feed_url:
+                    fetch_full = bool(f.get('fetch_full_content', False))
+                    break
+            
             for entry in entries:
                 try:
                     # Parse published date with multiple format support
@@ -220,6 +283,13 @@ class RSSScraper(BaseScraper):
                     # Clean HTML from content
                     content = self.clean_html(content)
                     
+                    # Optionally fetch full page text (e.g., Baxtel RSS descriptions can be short)
+                    url = entry.link if hasattr(entry, 'link') else ''
+                    if fetch_full and url:
+                        full_text = self.extract_full_article_text(url)
+                        if full_text and len(full_text) > len(content):
+                            content = full_text
+                    
                     # Get tags/categories
                     tags = []
                     if hasattr(entry, 'tags'):
@@ -228,7 +298,7 @@ class RSSScraper(BaseScraper):
                     article = {
                         'title': entry.title if hasattr(entry, 'title') else '',
                         'content': content,
-                        'url': entry.link if hasattr(entry, 'link') else '',
+                        'url': url,
                         'published_date': published_date,
                         'author': entry.get('author', ''),
                         'source': feed_name,
