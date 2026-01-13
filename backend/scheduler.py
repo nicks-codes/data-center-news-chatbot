@@ -3,6 +3,7 @@ Scheduler for running scrapers continuously
 """
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.schedulers.base import SchedulerNotRunningError
 import logging
 import atexit
 from datetime import datetime
@@ -54,7 +55,16 @@ class ScrapingScheduler:
         )
         
         # Register shutdown handler
-        atexit.register(lambda: self.scheduler.shutdown())
+        def _safe_shutdown():
+            try:
+                self.scheduler.shutdown()
+            except SchedulerNotRunningError:
+                pass
+            except Exception:
+                # Avoid noisy exit-time errors; scheduler shutdown is best-effort.
+                pass
+
+        atexit.register(_safe_shutdown)
     
     def deduplicate_articles(self, articles: list, db) -> list:
         """Remove duplicate articles based on canonical URL hash (and URL fallback)."""

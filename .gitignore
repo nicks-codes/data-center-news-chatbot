@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+
+# Local environment
+.env
+
+# Local data / artifacts
+cost_stats.json
+chroma_db/
+*.db
+
