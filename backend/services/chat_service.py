@@ -266,6 +266,246 @@ class ChatService:
         
         return articles
 
+    def _parse_time_window_days(self, query: str) -> Optional[int]:
+        ql = (query or "").lower()
+        # last N days
+        m = re.search(r"last\\s+(\\d{1,3})\\s+days", ql)
+        if m:
+            try:
+                return max(1, min(365, int(m.group(1))))
+            except Exception:
+                return None
+        # this week / past week
+        if any(k in ql for k in ["this week", "past week", "last week"]):
+            return 7
+        # this month / past month
+        if any(k in ql for k in ["this month", "past month", "last month"]):
+            return 30
+        # recent/latest default handled elsewhere
+        return None
+
+    def _dedupe_and_cap_sources(self, items: List[Dict[str, Any]], *, max_sources: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Return (selected_items, sources[]) where:
+        - sources are deduped by URL and capped
+        - selected_items are aligned to sources order (same URL ordering)
+        """
+        max_sources = max(1, min(int(max_sources or 10), 25))
+        seen = set()
+        selected = []
+        sources = []
+        for it in items:
+            url = (it.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            selected.append(it)
+            sources.append({"title": it.get("title") or "", "url": url, "source": it.get("source") or ""})
+            if len(sources) >= max_sources:
+                break
+        return selected, sources
+
+    def _strip_out_of_range_citations(self, text: str, *, max_cite: int) -> str:
+        if not text:
+            return text
+        max_cite = int(max_cite or 0)
+        if max_cite <= 0:
+            # remove all citations if no sources
+            return re.sub(r"\[(\d+)\]", "", text)
+
+        def _repl(m):
+            try:
+                n = int(m.group(1))
+            except Exception:
+                return ""
+            return m.group(0) if 1 <= n <= max_cite else ""
+
+        return re.sub(r"\[(\d+)\]", _repl, text)
+
+    def _filter_by_recency_days(self, articles: List[Dict[str, Any]], *, days: int) -> List[Dict[str, Any]]:
+        """
+        Keep only articles with published_date within the last N days.
+        If published_date is missing/unparseable, drop it for recency-filtered intents.
+        """
+        try:
+            days = int(days)
+        except Exception:
+            return articles
+        if days <= 0:
+            return articles
+        cutoff = datetime.utcnow() - timedelta(days=days)
+
+        out: List[Dict[str, Any]] = []
+        for a in articles or []:
+            pd = a.get("published_date")
+            if not pd:
+                continue
+            try:
+                if isinstance(pd, datetime):
+                    dt = pd
+                else:
+                    dt = datetime.fromisoformat(str(pd).replace("Z", "+00:00"))
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(tz=None).replace(tzinfo=None)
+                if dt >= cutoff:
+                    out.append(a)
+            except Exception:
+                continue
+        return out
+
+    def _normalize_vec(self, v: List[float]) -> List[float]:
+        s = 0.0
+        for x in v:
+            s += float(x) * float(x)
+        if s <= 0.0:
+            return v
+        inv = (s ** 0.5)
+        return [float(x) / inv for x in v]
+
+    def _cos_sim(self, a: List[float], b: List[float]) -> float:
+        s = 0.0
+        for x, y in zip(a, b):
+            s += float(x) * float(y)
+        return float(s)
+
+    def _kmeans_cosine(self, vectors: List[List[float]], k: int, iters: int = 7) -> List[int]:
+        """
+        Very small, dependency-free k-means using cosine similarity.
+        Returns cluster assignment per vector.
+        """
+        n = len(vectors)
+        if n == 0:
+            return []
+        k = max(1, min(int(k), n))
+        vs = [self._normalize_vec(v) for v in vectors]
+
+        # Deterministic "farthest-first" init
+        centroids = [vs[0]]
+        while len(centroids) < k:
+            best_i = 0
+            best_d = None
+            for i in range(n):
+                sims = [self._cos_sim(vs[i], c) for c in centroids]
+                d = 1.0 - max(sims)
+                if best_d is None or d > best_d:
+                    best_d = d
+                    best_i = i
+            centroids.append(vs[best_i])
+
+        assign = [0] * n
+        for _ in range(iters):
+            # assign
+            for i in range(n):
+                best_j = 0
+                best_s = None
+                for j in range(k):
+                    s = self._cos_sim(vs[i], centroids[j])
+                    if best_s is None or s > best_s:
+                        best_s = s
+                        best_j = j
+                assign[i] = best_j
+            # recompute
+            sums = [[0.0] * len(vs[0]) for _ in range(k)]
+            counts = [0] * k
+            for i in range(n):
+                j = assign[i]
+                counts[j] += 1
+                vi = vs[i]
+                for d in range(len(vi)):
+                    sums[j][d] += vi[d]
+            for j in range(k):
+                if counts[j] == 0:
+                    continue
+                centroids[j] = self._normalize_vec([x / counts[j] for x in sums[j]])
+        return assign
+
+    def _cluster_label(self, titles: List[str]) -> str:
+        """Cheap labeler grounded in titles."""
+        t = " ".join(titles).lower()
+        buckets = [
+            ("Cooling & thermal", ["cool", "immersion", "direct-to-chip", "d2c", "liquid", "rear-door", "cdu"]),
+            ("Power & grid", ["power", "grid", "interconnect", "substation", "utility", "transformer"]),
+            ("Deals & capital", ["fund", "raise", "investment", "acquir", "m&a", "deal"]),
+            ("Permitting & policy", ["permit", "zoning", "regulat", "moratorium", "policy"]),
+            ("Markets & site selection", ["site", "campus", "build", "construction", "lease", "virginia", "dfw", "phoenix", "ohio", "ireland", "singapore"]),
+            ("AI & compute demand", ["ai", "gpu", "nvidia", "training", "inference"]),
+        ]
+        best = ("Themes", 0)
+        for name, keys in buckets:
+            score = sum(1 for k in keys if k in t)
+            if score > best[1]:
+                best = (name, score)
+        return best[0]
+
+    def _build_theme_hints(
+        self,
+        items: List[Dict[str, Any]],
+        *,
+        max_themes: int = 3,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """
+        Cluster candidates and return (theme_hints_text, clusters) where clusters contain:
+        {label, indices}
+        """
+        # Dedupe by URL while preserving order
+        deduped = []
+        seen = set()
+        for a in items:
+            u = (a.get("url") or "").strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            deduped.append(a)
+            if len(deduped) >= 50:
+                break
+
+        if len(deduped) < 4:
+            return "", []
+
+        reps = []
+        for a in deduped:
+            title = (a.get("title") or "").strip()
+            snippet = (a.get("content") or "").strip().replace("\n", " ")
+            reps.append((title + "\n" + snippet[:280]).strip())
+
+        clusters: List[Dict[str, Any]] = []
+
+        if getattr(self.embedding_service, "enabled", False):
+            embs = self.embedding_service.generate_embeddings_batch(reps)
+            ok = [(i, e) for i, e in enumerate(embs) if e]
+            if len(ok) >= 6:
+                vecs = [e for _, e in ok]
+                n = len(vecs)
+                k = 3 if n < 14 else (4 if n < 28 else 5)
+                assign = self._kmeans_cosine(vecs, k=k, iters=7)
+                by = {}
+                for (orig_i, _), c in zip(ok, assign):
+                    by.setdefault(int(c), []).append(orig_i)
+                for _, idxs in sorted(by.items(), key=lambda kv: len(kv[1]), reverse=True):
+                    titles = [(deduped[i].get("title") or "") for i in idxs[:8]]
+                    clusters.append({"label": self._cluster_label(titles), "indices": idxs})
+            else:
+                # fall back to keyword grouping
+                clusters = []
+
+        if not clusters:
+            # Keyword-based grouping fallback (cheap, no LLM required)
+            by_label: Dict[str, List[int]] = {}
+            for i, a in enumerate(deduped):
+                label = self._cluster_label([(a.get("title") or "")])
+                by_label.setdefault(label, []).append(i)
+            for label, idxs in sorted(by_label.items(), key=lambda kv: len(kv[1]), reverse=True):
+                clusters.append({"label": label, "indices": idxs})
+
+        clusters = clusters[:max(1, min(max_themes, 5))]
+        hint_lines = []
+        for c in clusters[:max_themes]:
+            idxs = c["indices"][:6]
+            titles = [deduped[i].get("title") or "" for i in idxs]
+            hint_lines.append(f"- {c['label']}: " + "; ".join(titles[:4]))
+        theme_hints = "Theme candidates (clustered from retrieved items):\n" + "\n".join(hint_lines)
+        return theme_hints, clusters
+
     def _estimate_tokens(self, text: str) -> int:
         """
         Cheap token estimate (works without tokenizer deps).
@@ -478,7 +718,7 @@ Write the updated memory summary as 6-14 bullet points."""
             "mode": mode,
         }
 
-    def _clean_rundown_answer(self, answer: str, *, audience: str) -> str:
+    def _clean_rundown_answer(self, answer: str, *, audience: str, max_sources: int) -> str:
         """
         Enforce clean, scannable Rundown layout:
         - Remove any Sources section (API returns sources separately)
@@ -508,6 +748,9 @@ Write the updated memory summary as 6-14 bullet points."""
                 s = indent + "- " + s.lstrip()[2:]
             norm.append(s)
         lines = norm
+
+        # Remove out-of-range citations early (then bullets may be dropped for having no citations)
+        lines = self._strip_out_of_range_citations("\n".join(lines), max_cite=max_sources).splitlines()
 
         aud = (audience or "Exec").strip()
         allowed_headers = {
@@ -576,14 +819,19 @@ Write the updated memory summary as 6-14 bullet points."""
 
             # Keep only dash bullets
             if t.startswith("- "):
+                has_cite = bool(re.search(r"\\[\\d+\\]", t))
                 if section == "what":
                     if what_bullets >= 5:
+                        continue
+                    if not has_cite:
                         continue
                     out.append(t)
                     what_bullets += 1
                     continue
                 if section == "why":
                     if why_bullets >= 3:
+                        continue
+                    if not has_cite:
                         continue
                     out.append(t)
                     why_bullets += 1
@@ -600,6 +848,8 @@ Write the updated memory summary as 6-14 bullet points."""
                         continue
                     if theme_bullets >= 3:
                         continue
+                    if not has_cite:
+                        continue
                     out.append(t)
                     theme_bullets += 1
                     continue
@@ -608,7 +858,9 @@ Write the updated memory summary as 6-14 bullet points."""
             # Drop other prose lines to keep it scannable
             continue
 
-        return "\n".join(out).strip()
+        cleaned = "\n".join(out).strip()
+        cleaned = self._strip_out_of_range_citations(cleaned, max_cite=max_sources)
+        return cleaned
 
     def _select_chat_model(self) -> str:
         if self.provider == "groq":
@@ -956,6 +1208,8 @@ Items:
         audience: Optional[str] = None,
         memory_summary: Optional[str] = None,
         recent_messages: Optional[List[Message]] = None,
+        response_meta: Optional[Dict[str, Any]] = None,
+        theme_hints: Optional[str] = None,
     ) -> Dict:
         """Generate AI response using retrieved context"""
         if not self.enabled:
@@ -964,7 +1218,7 @@ Items:
                 'sources': []
             }
         
-        # Build context from articles
+        # Build context from articles (sources are backend-controlled/capped upstream)
         context_text = ""
         sources = []
 
@@ -972,9 +1226,9 @@ Items:
         published_dates = []
         
         for i, article in enumerate(context_articles, 1):
-            context_text += f"\n[Article {i}]\n"
+            context_text += f"\n[Source {i}]\n"
             context_text += f"Title: {article['title']}\n"
-            context_text += f"Source: {article['source']}\n"
+            context_text += f"Publisher: {article['source']}\n"
             if article.get("published_date"):
                 context_text += f"Published: {article['published_date']}\n"
                 published_dates.append(article.get("published_date"))
@@ -1002,6 +1256,10 @@ Hard rules:
 - Adapt tone/depth to the requested audience: Exec, Investor, Operator, Engineer/Architect, Sustainability, Vendor.
 - Use ONLY dash bullets: every bullet line MUST start with "- " (dash + space). Do not use "*" bullets.
 - Do NOT include a "Sources" section in the answer (sources are shown separately in the UI). Only cite inline like [1].
+- No filler: any bullet in "What changed recently", "Themes", or "Why it matters" MUST include at least one citation like [1].
+- Themes must be grounded: use the provided "Theme candidates" (clustered from retrieved items) to name themes and avoid repetition.
+- When possible, each theme should cite 2+ different sources across its bullets (not the same [1] repeatedly).
+- "Why it matters" bullets must explicitly connect a cited item to an implication (e.g., "Because [3] indicates X, expect Y…").
 
 Length limits (strict):
 - "What changed recently": max 5 bullets.
@@ -1065,6 +1323,7 @@ Output format exactly:
 Mode: {"construction_projects" if construction_mode else "default"}
 
 Recency note: newest provided item is {newest_days if newest_days is not None else "unknown"} days old.
+Time window: last {((response_meta or {}).get("time_window_days")) if response_meta else "unknown"} days.
 
 Conversation memory (may be empty):
 {mem if mem else "(none)"}
@@ -1074,11 +1333,13 @@ Recent conversation turns:
 
 Question: {query}
 
-Available Articles:
+Available Articles (numbered for citations):
 {context_text}
 
-Sources list to cite (do not reorder, do not add URLs):
+Sources list to cite (exact; citations must refer to these numbers):
 {sources_block}
+
+{(theme_hints or "").strip()}
 
 Task:
 - Write the Rundown-style sections exactly as specified.
@@ -1104,11 +1365,12 @@ Construction projects mode instructions (only if Mode=construction_projects):
                     }
 
             answer = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=850, temperature=0.25)
-            answer = self._clean_rundown_answer(answer, audience=aud)
+            answer = self._clean_rundown_answer(answer, audience=aud, max_sources=len(sources))
             
             return {
                 'answer': answer,
-                'sources': sources
+                'sources': sources,
+                'meta': response_meta or {},
             }
         except Exception as e:
             logger.error(f"Error generating chat response: {e}")
@@ -1116,11 +1378,13 @@ Construction projects mode instructions (only if Mode=construction_projects):
             if "cost limit" in error_msg.lower() or "limit exceeded" in error_msg.lower():
                 return {
                     'answer': "I've reached the cost limit. Please check your usage or adjust limits in the .env file.",
-                    'sources': []
+                    'sources': [],
+                    'meta': response_meta or {},
                 }
             return {
                 'answer': f"Sorry, I encountered an error: {error_msg}",
-                'sources': sources
+                'sources': sources,
+                'meta': response_meta or {},
             }
     
     def chat(
@@ -1157,6 +1421,7 @@ Construction projects mode instructions (only if Mode=construction_projects):
                     'sources': [],
                     'conversation_id': conv.id,
                     'suggested_followups': ["Trigger a scrape", "Ask for a weekly digest", "Ask about a specific market (e.g., DFW, N. Virginia)"],
+                    'meta': {"time_window_days": None, "sources_used": 0, "coverage_thin": False, "widened_to_days": None, "semantic_enabled": False},
                 }
         finally:
             db.close()
@@ -1183,6 +1448,7 @@ Construction projects mode instructions (only if Mode=construction_projects):
                     "sources": [],
                     "conversation_id": conv.id,
                     "suggested_followups": [],
+                    "meta": {"time_window_days": None, "sources_used": 0, "coverage_thin": False, "widened_to_days": None, "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0)},
                 }
 
             # Load memory + last N turns for continuity
@@ -1190,10 +1456,19 @@ Construction projects mode instructions (only if Mode=construction_projects):
             memory_summary = (conv.memory_summary or "").strip() or None
             aud = (audience or conv.audience or "Exec").strip()
             constraints = route.get("constraints") or {}
+            intent = route.get("intent") or "news_update"
+            mode = route.get("mode")
         finally:
             db.close()
 
-        # Retrieve more candidates to support themes, then let the LLM cluster/synthesize.
+        # Recency window (default last 14 days for "latest/news/deals/construction" intents; overridable).
+        requested_days = self._parse_time_window_days(query)
+        default_days = 14 if (intent in {"news_update", "deal_monitor"} or mode == "construction_projects") else None
+        time_window_days = requested_days or default_days
+        widened = False
+        coverage_thin = False
+
+        # Retrieve more candidates to support themes, then cluster/synthesize.
         search_query = query
         try:
             extras = []
@@ -1224,7 +1499,18 @@ Construction projects mode instructions (only if Mode=construction_projects):
         except Exception:
             search_query = query
 
-        articles = self.retrieve_relevant_articles(search_query, n_results=40)
+        # Pull a larger candidate set so recency filtering can still find enough.
+        candidate_pool = self.retrieve_relevant_articles(search_query, n_results=80)
+        articles = candidate_pool
+
+        if time_window_days:
+            articles = self._filter_by_recency_days(candidate_pool, days=int(time_window_days))
+            if len(articles) < 4 and (requested_days is None) and int(time_window_days) < 30:
+                # Auto-widen to 30 days, but surface this via meta/UI (not via uncited bullets).
+                coverage_thin = True
+                widened = True
+                time_window_days = 30
+                articles = self._filter_by_recency_days(candidate_pool, days=30)
         
         # Proactive fallback: if it's a location question and we didn't retrieve any location hits,
         # try to fetch a few fresh, location-specific items and re-run retrieval once.
@@ -1238,7 +1524,10 @@ Construction projects mode instructions (only if Mode=construction_projects):
             if not have_loc:
                 inserted = self._proactive_fetch(query)
                 if inserted > 0:
-                    articles = self.retrieve_relevant_articles(query, n_results=40)
+                    candidate_pool = self.retrieve_relevant_articles(search_query, n_results=80)
+                    articles = candidate_pool
+                    if time_window_days:
+                        articles = self._filter_by_recency_days(candidate_pool, days=int(time_window_days))
         
         if not articles:
             # Persist assistant reply
@@ -1256,15 +1545,83 @@ Construction projects mode instructions (only if Mode=construction_projects):
                 'sources': [],
                 'conversation_id': cid,
                 'suggested_followups': ["Last 7 days", "Focus on a specific market", "Compare two cooling options for a rack density"],
+                'meta': {
+                    "time_window_days": time_window_days or None,
+                    "sources_used": 0,
+                    "coverage_thin": coverage_thin,
+                    "widened_to_days": 30 if widened else None,
+                    "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0),
+                },
             }
         
-        # Generate response
+        # Cluster candidates (real clustering when embeddings are enabled) to build grounded theme hints.
+        theme_hints, clusters = self._build_theme_hints(articles, max_themes=3)
+
+        # Backend-controlled sources list (dedupe + cap) to keep citations stable in the UI.
+        # Prefer selecting from top clusters to make Themes distinct and grounded.
+        max_sources = int(os.getenv("CHAT_MAX_SOURCES", "10") or "10")
+        # Deduped list for selection
+        deduped = []
+        seen = set()
+        for a in articles:
+            u = (a.get("url") or "").strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            deduped.append(a)
+            if len(deduped) >= 50:
+                break
+
+        selected: List[Dict[str, Any]] = []
+        if clusters:
+            # Map cluster indices over deduped list (as built in _build_theme_hints)
+            # Select up to ~even spread across top clusters
+            per_cluster = max(2, int((max_sources + 2) / 3))
+            selected_urls = set()
+            for c in clusters[:3]:
+                count = 0
+                for idx in c.get("indices", []):
+                    if idx < 0 or idx >= len(deduped):
+                        continue
+                    u = (deduped[idx].get("url") or "").strip()
+                    if not u or u in selected_urls:
+                        continue
+                    selected.append(deduped[idx])
+                    selected_urls.add(u)
+                    count += 1
+                    if count >= per_cluster:
+                        break
+            # Fill remainder
+            for a in deduped:
+                if len(selected) >= max_sources:
+                    break
+                u = (a.get("url") or "").strip()
+                if not u or u in selected_urls:
+                    continue
+                selected.append(a)
+                selected_urls.add(u)
+        else:
+            selected = deduped
+
+        selected_articles, sources = self._dedupe_and_cap_sources(selected, max_sources=max_sources)
+
+        response_meta = {
+            "time_window_days": time_window_days or None,
+            "sources_used": len(sources),
+            "coverage_thin": coverage_thin,
+            "widened_to_days": 30 if widened else None,
+            "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0),
+        }
+
+        # Generate response (only from selected sources)
         result = self.generate_response(
             query,
-            articles[:25],  # cap context size
+            selected_articles,
             audience=aud,
             memory_summary=memory_summary,
             recent_messages=recent_messages,
+            response_meta=response_meta,
+            theme_hints=theme_hints,
         )
 
         # Persist assistant reply

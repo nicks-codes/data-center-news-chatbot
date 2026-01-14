@@ -12,7 +12,7 @@ kill_timeout = "5s"
 [env]
   PORT = "8080"
   AI_PROVIDER = "groq"
-  EMBEDDING_PROVIDER = "sentence-transformers"
+  EMBEDDING_PROVIDER = "openai"
   DATABASE_URL = "sqlite:///./data/datacenter_news.db"
   CHROMA_DB_PATH = "/data/chroma_db"
 

@@ -473,6 +473,33 @@ body {
     padding: 0.1rem 0.45rem;
 }
 
+.answer-meta {
+    max-width: 800px;
+    margin: 0.25rem auto 0.5rem auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.meta-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: rgba(30, 41, 59, 0.92);
+    background: rgba(100, 116, 139, 0.08);
+    border: 1px solid rgba(100, 116, 139, 0.18);
+    border-radius: 999px;
+    padding: 0.25rem 0.55rem;
+}
+
+.meta-pill.warn {
+    color: rgba(146, 64, 14, 0.95);
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.25);
+}
+
 .sources-toggle {
     margin-top: 0.5rem;
     border: 1px solid var(--border-color);

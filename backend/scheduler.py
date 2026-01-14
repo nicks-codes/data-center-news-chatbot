@@ -289,11 +289,122 @@ class ScrapingScheduler:
         self.scheduler.start()
         self.is_running = True
         logger.info(f"Scraping scheduler started (interval: {SCRAPE_INTERVAL} minutes)")
+
+        # Best-effort: backfill missing embeddings on startup so semantic retrieval is active after restart.
+        # Runs in a background thread.
+        self._start_embedding_backfill()
         
         # Run initial scrape in background
         import threading
         thread = threading.Thread(target=self.run_all_scrapers, daemon=True)
         thread.start()
+
+    def _start_embedding_backfill(self):
+        import threading
+
+        def _run():
+            try:
+                if not getattr(self.embedding_service, "enabled", False):
+                    logger.info("Embedding backfill skipped (embeddings disabled/unavailable).")
+                    return
+                if getattr(self.vector_store, "collection", None) is None:
+                    logger.info("Embedding backfill skipped (vector store unavailable).")
+                    return
+
+                # Only backfill a bounded amount per startup to avoid runaway costs.
+                max_to_embed = int(os.getenv("STARTUP_EMBED_BACKFILL_LIMIT", "200") or "200")
+                batch_size = int(os.getenv("STARTUP_EMBED_BACKFILL_BATCH", "25") or "25")
+                max_to_embed = max(0, min(max_to_embed, 2000))
+                batch_size = max(5, min(batch_size, 100))
+                if max_to_embed == 0:
+                    return
+
+                db = SessionLocal()
+                try:
+                    q = db.query(Article).filter(Article.has_embedding == False).order_by(Article.published_date.desc().nullslast(), Article.scraped_date.desc())  # noqa: E712
+                    remaining = q.count()
+                    if remaining == 0:
+                        logger.info("Embedding backfill: no missing embeddings.")
+                        return
+                    logger.info(f"Embedding backfill: {remaining} articles missing embeddings (embedding up to {max_to_embed}).")
+
+                    offset = 0
+                    embedded_articles = 0
+                    while embedded_articles < max_to_embed:
+                        batch = q.offset(offset).limit(batch_size).all()
+                        if not batch:
+                            break
+
+                        vector_ids = []
+                        texts = []
+                        metadatas = []
+                        documents = []
+
+                        max_chunks = int(os.getenv("MAX_EMBED_CHUNKS_PER_ARTICLE", "8") or "8")
+                        chunk_size = int(os.getenv("EMBED_CHUNK_MAX_CHARS", "1200") or "1200")
+                        chunk_overlap = int(os.getenv("EMBED_CHUNK_OVERLAP_CHARS", "200") or "200")
+
+                        for a in batch:
+                            base_text = f"{a.title}\n\n{(a.content or '')}"
+                            chunks = chunk_text(
+                                base_text,
+                                max_chars=chunk_size,
+                                overlap_chars=chunk_overlap,
+                                max_chunks=max_chunks,
+                            )
+                            if not chunks:
+                                continue
+
+                            published_iso = a.published_date.isoformat() if a.published_date else None
+                            for idx, ch in enumerate(chunks):
+                                vector_ids.append(f"article_{a.id}_chunk_{idx}")
+                                texts.append(ch)
+                                documents.append(ch)
+                                metadatas.append({
+                                    "article_id": a.id,
+                                    "chunk_index": idx,
+                                    "chunk_total": len(chunks),
+                                    "title": a.title,
+                                    "source": a.source,
+                                    "source_type": a.source_type,
+                                    "url": a.url,
+                                    "published_date": published_iso,
+                                })
+
+                        if not vector_ids:
+                            offset += batch_size
+                            continue
+
+                        embeddings = self.embedding_service.generate_embeddings_batch(texts)
+                        ok_ids = []
+                        ok_embs = []
+                        ok_metas = []
+                        ok_docs = []
+                        for vid, emb, meta, doc in zip(vector_ids, embeddings, metadatas, documents):
+                            if emb:
+                                ok_ids.append(vid)
+                                ok_embs.append(emb)
+                                ok_metas.append(meta)
+                                ok_docs.append(doc)
+
+                        if ok_ids and self.vector_store.add_articles_batch(ok_ids, ok_embs, ok_metas, documents=ok_docs):
+                            embedded_article_ids = {m["article_id"] for m in ok_metas if "article_id" in m}
+                            for a in batch:
+                                if a.id in embedded_article_ids:
+                                    a.has_embedding = True
+                                    a.embedding_id = f"article_{a.id}"
+                                    embedded_articles += 1
+                            db.commit()
+
+                        offset += batch_size
+
+                    logger.info(f"Embedding backfill complete. Embedded {embedded_articles} articles this startup.")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Embedding backfill failed: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
     
     def stop(self):
         """Stop the scheduler"""

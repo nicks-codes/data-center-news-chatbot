@@ -138,6 +138,7 @@ class ChatResponse(BaseModel):
     sources: list
     conversation_id: Optional[str] = None
     suggested_followups: Optional[list] = None
+    meta: Optional[dict] = None
 
 class SummaryResponse(BaseModel):
     article_id: int
