@@ -124,6 +124,8 @@ async def get_js():
 # Request/Response models
 class ChatRequest(BaseModel):
     query: str
+    history: list = []
+    audience: Optional[str] = None
 
 class ChatResponse(BaseModel):
     answer: str
@@ -173,7 +175,11 @@ async def chat(request: ChatRequest):
         if not request.query or not request.query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
-        result = chat_service.chat(request.query.strip())
+        result = chat_service.chat(
+            request.query.strip(),
+            history=request.history or [],
+            audience=request.audience,
+        )
         return ChatResponse(**result)
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")

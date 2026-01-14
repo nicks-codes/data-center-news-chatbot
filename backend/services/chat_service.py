@@ -668,8 +668,8 @@ Provide a clear, informative answer based on these sources. Include specific det
                 'sources': sources
             }
     
-    def chat(self, query: str) -> Dict:
-        """Main chat method: retrieve context and generate response"""
+    def chat(self, query: str, history: Optional[List[Dict]] = None, audience: Optional[str] = None) -> Dict:
+        """Main chat method: retrieve context and generate response (history/audience accepted for compatibility)."""
         # If no articles in database, provide helpful message
         db = SessionLocal()
         try:
