@@ -28,8 +28,9 @@ class VectorStore:
             logger.warning("VectorStore initialized but ChromaDB is not available")
             return
             
-        # Initialize ChromaDB
-        persist_directory = os.getenv("CHROMA_DB_PATH", "./chroma_db")
+        # Initialize ChromaDB (prefer persistent disk when available)
+        default_path = "/data/chroma_db" if os.path.isdir("/data") else "./chroma_db"
+        persist_directory = os.getenv("CHROMA_DB_PATH", default_path)
         self.client = chromadb.PersistentClient(path=persist_directory)
         self.collection = self.client.get_or_create_collection(
             name="datacenter_articles",

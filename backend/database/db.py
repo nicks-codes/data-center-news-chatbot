@@ -19,7 +19,20 @@ for env_path in env_paths:
 else:
     load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./datacenter_news.db")
+def _default_db_url() -> str:
+    """
+    Prefer a persistent disk location when available (e.g. /data on Fly/Render).
+    Falls back to a local SQLite file in the backend directory.
+    """
+    try:
+        if os.path.isdir("/data"):
+            return "sqlite:////data/datacenter_news.db"
+    except Exception:
+        pass
+    return "sqlite:///./datacenter_news.db"
+
+
+DATABASE_URL = os.getenv("DATABASE_URL", _default_db_url())
 
 # Fix SQLite path to be absolute and ensure directory exists
 if DATABASE_URL.startswith("sqlite"):

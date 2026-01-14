@@ -13,8 +13,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=sqlite:///./data/datacenter_news.db
-      - CHROMA_DB_PATH=/app/data/chroma_db
+      - DATABASE_URL=sqlite:////data/datacenter_news.db
+      - CHROMA_DB_PATH=/data/chroma_db
       - AI_PROVIDER=${AI_PROVIDER:-groq}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-sentence-transformers}
       - GROQ_API_KEY=${GROQ_API_KEY}
@@ -25,7 +25,7 @@ services:
       - TWITTER_BEARER_TOKEN=${TWITTER_BEARER_TOKEN:-}
       - SCRAPE_INTERVAL_MINUTES=${SCRAPE_INTERVAL_MINUTES:-30}
     volumes:
-      - datacenter_data:/app/data
+      - datacenter_data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
