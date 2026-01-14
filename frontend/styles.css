@@ -290,6 +290,72 @@ body {
     margin-bottom: 0;
 }
 
+/* Markdown styling for assistant answers */
+.message.assistant .message-content h2,
+.message.assistant .message-content h3 {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    line-height: 1.25;
+}
+
+.message.assistant .message-content h2 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.message.assistant .message-content h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.message.assistant .message-content ul,
+.message.assistant .message-content ol {
+    margin: 0.5rem 0 0.75rem 1.25rem;
+    padding-left: 1rem;
+}
+
+.message.assistant .message-content li {
+    margin: 0.25rem 0;
+}
+
+.message.assistant .message-content code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.95em;
+    background: #f1f5f9;
+    padding: 0.1rem 0.35rem;
+    border-radius: 6px;
+}
+
+.message.assistant .message-content pre {
+    background: #0b1220;
+    color: #e2e8f0;
+    padding: 0.9rem 1rem;
+    border-radius: 10px;
+    overflow: auto;
+    margin: 0.75rem 0;
+}
+
+.message.assistant .message-content pre code {
+    background: transparent;
+    color: inherit;
+    padding: 0;
+}
+
+.message.assistant .message-content a {
+    color: var(--primary-color);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.message.assistant .message-content blockquote {
+    border-left: 3px solid var(--border-color);
+    padding-left: 0.75rem;
+    margin: 0.75rem 0;
+    color: var(--text-secondary);
+}
+
 /* Sources */
 .sources {
     margin-top: 1rem;

@@ -160,12 +160,18 @@ function addMessage(content, role, sources = []) {
     const messageEl = document.createElement('div');
     messageEl.className = `message ${role}`;
     
-    // Format content with proper paragraphs
-    const formattedContent = content
-        .split('\n')
-        .filter(p => p.trim())
-        .map(p => `<p>${escapeHtml(p)}</p>`)
-        .join('');
+    let formattedContent = '';
+
+    if (role === 'assistant') {
+        formattedContent = renderAssistantMarkdown(content);
+    } else {
+        // User messages: keep simple + safe
+        formattedContent = content
+            .split('\n')
+            .filter(p => p.trim())
+            .map(p => `<p>${escapeHtml(p)}</p>`)
+            .join('');
+    }
     
     let sourcesHtml = '';
     if (sources && sources.length > 0) {
@@ -190,6 +196,13 @@ function addMessage(content, role, sources = []) {
     `;
     
     chatMessages.appendChild(messageEl);
+    // Ensure links in assistant markdown open safely in a new tab
+    if (role === 'assistant') {
+        messageEl.querySelectorAll('.message-content a').forEach(a => {
+            a.setAttribute('target', '_blank');
+            a.setAttribute('rel', 'noopener noreferrer');
+        });
+    }
     scrollToBottom();
 }
 
@@ -243,6 +256,32 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function renderAssistantMarkdown(text) {
+    const raw = (text || '').toString();
+
+    // If markdown libs aren't available, fall back to simple paragraph formatting.
+    if (!window.marked || !window.DOMPurify) {
+        return raw
+            .split('\n')
+            .filter(p => p.trim())
+            .map(p => `<p>${escapeHtml(p)}</p>`)
+            .join('');
+    }
+
+    // Configure for readable chat output
+    window.marked.setOptions({
+        gfm: true,
+        breaks: true,
+        headerIds: false,
+        mangle: false,
+    });
+
+    const html = window.marked.parse(raw);
+    return window.DOMPurify.sanitize(html, {
+        USE_PROFILES: { html: true },
+    });
 }
 
 // Handle Enter key in input
