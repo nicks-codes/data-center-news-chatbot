@@ -17,6 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import sys
+
+# Ensure "backend" package is importable when running as a script
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from backend.database.db import init_db
 from backend.services.chat_service import ChatService
 
