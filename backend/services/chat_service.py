@@ -729,23 +729,29 @@ Write the updated memory summary as 6-14 bullet points."""
         if not raw:
             return raw
 
-        # Hard remove any trailing sources section
+        # Hard remove any trailing sources section (several variants)
         lines = raw.splitlines()
         cut_idx = None
         for i, ln in enumerate(lines):
-            if ln.strip().lower().startswith("## sources"):
+            low = ln.strip().lower()
+            if low.startswith("## sources") or low == "sources" or low.startswith("sources:"):
                 cut_idx = i
                 break
         if cut_idx is not None:
             lines = lines[:cut_idx]
 
-        # Normalize bullet markers "* " -> "- "
+        # Normalize bullet markers ("* ", "• ", numbered) -> "- "
         norm = []
         for ln in lines:
             s = ln.rstrip()
-            if s.lstrip().startswith("* "):
+            ls = s.lstrip()
+            if ls.startswith("* ") or ls.startswith("• "):
                 indent = s[: len(s) - len(s.lstrip())]
-                s = indent + "- " + s.lstrip()[2:]
+                s = indent + "- " + ls[2:]
+            else:
+                m = re.match(r"^(\\s*)\\d+\\.\\s+(.*)$", s)
+                if m:
+                    s = f"{m.group(1)}- {m.group(2)}"
             norm.append(s)
         lines = norm
 
@@ -819,7 +825,7 @@ Write the updated memory summary as 6-14 bullet points."""
 
             # Keep only dash bullets
             if t.startswith("- "):
-                has_cite = bool(re.search(r"\\[\\d+\\]", t))
+                has_cite = bool(re.search(r"\[\d+\]", t))
                 if section == "what":
                     if what_bullets >= 5:
                         continue
@@ -1559,7 +1565,8 @@ Construction projects mode instructions (only if Mode=construction_projects):
 
         # Backend-controlled sources list (dedupe + cap) to keep citations stable in the UI.
         # Prefer selecting from top clusters to make Themes distinct and grounded.
-        max_sources = int(os.getenv("CHAT_MAX_SOURCES", "10") or "10")
+        # Hard cap at 10 so citations always map to UI sources.
+        max_sources = 10
         # Deduped list for selection
         deduped = []
         seen = set()

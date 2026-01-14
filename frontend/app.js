@@ -446,8 +446,8 @@ function renderAssistantMarkdown(text) {
             continue;
         }
 
-        // Bullets
-        const ul = trimmed.match(/^[-*]\s+(.*)$/);
+        // Bullets (accept '-' '*' and '•')
+        const ul = trimmed.match(/^[-*•]\s+(.*)$/);
         if (ul) {
             if (inOl) {
                 html += '</ol>';
