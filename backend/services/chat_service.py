@@ -6,16 +6,17 @@ try:
 except ImportError:  # pragma: no cover
     openai = None
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any, Tuple
 import logging
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
+from uuid import uuid4
 from .embedding_service import EmbeddingService
 from .vector_store import VectorStore
 from .cost_tracker import CostTracker
-from ..database.models import Article
+from ..database.models import Article, Conversation, Message
 from ..database.db import SessionLocal
 from ..scrapers.base_scraper import DC_RELEVANCE_KEYWORDS, EXCLUDE_KEYWORDS
 
@@ -233,6 +234,212 @@ class ChatService:
             db.close()
         
         return articles
+
+    def _estimate_tokens(self, text: str) -> int:
+        """
+        Cheap token estimate (works without tokenizer deps).
+        English-ish heuristic: ~4 chars/token with some slack for whitespace.
+        """
+        if not text:
+            return 0
+        return max(1, int(len(text) / 4))
+
+    def _get_or_create_conversation(self, db, *, conversation_id: Optional[str], audience: Optional[str]) -> Conversation:
+        cid = (conversation_id or "").strip() or str(uuid4())
+        conv = db.query(Conversation).filter(Conversation.id == cid).first()
+        if not conv:
+            conv = Conversation(id=cid, audience=(audience or None), memory_summary=None)
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+        else:
+            # Best-effort audience persistence: keep first non-null, allow explicit override.
+            if audience and audience.strip() and (conv.audience != audience.strip()):
+                conv.audience = audience.strip()
+                conv.updated_at = datetime.utcnow()
+                db.commit()
+        return conv
+
+    def _load_recent_messages(self, db, *, conversation_id: str, limit: int = 12) -> List[Message]:
+        limit = max(0, min(int(limit or 12), 50))
+        if limit == 0:
+            return []
+        rows = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return list(reversed(rows))
+
+    def _count_conversation(self, db, *, conversation_id: str) -> Tuple[int, int]:
+        """Return (message_count, token_est_total)."""
+        rows = db.query(Message.tokens_est).filter(Message.conversation_id == conversation_id).all()
+        msg_count = len(rows)
+        tok_total = sum(int(r[0] or 0) for r in rows)
+        return msg_count, tok_total
+
+    def _maybe_summarize_and_prune(self, db, *, conv: Conversation) -> None:
+        """
+        If a conversation gets long, roll older turns into memory_summary and prune.
+        Policy:
+        - keep last KEEP_LAST messages
+        - when message_count exceeds MAX_MESSAGES or token estimate exceeds MAX_TOKENS, summarize + delete older messages
+        """
+        max_messages = int(os.getenv("CONVERSATION_MAX_MESSAGES", "20") or "20")
+        keep_last = int(os.getenv("CONVERSATION_KEEP_LAST", "12") or "12")
+        max_tokens = int(os.getenv("CONVERSATION_MAX_TOKENS_EST", "8000") or "8000")
+
+        keep_last = max(6, min(keep_last, 30))
+        max_messages = max(keep_last + 2, min(max_messages, 200))
+        max_tokens = max(2000, min(max_tokens, 50000))
+
+        msg_count, tok_total = self._count_conversation(db, conversation_id=conv.id)
+        if msg_count <= max_messages and tok_total <= max_tokens:
+            return
+
+        # Load older messages to summarize (everything except last keep_last)
+        all_msgs = (
+            db.query(Message)
+            .filter(Message.conversation_id == conv.id)
+            .order_by(Message.id.asc())
+            .all()
+        )
+        if len(all_msgs) <= keep_last:
+            return
+
+        to_summarize = all_msgs[:-keep_last]
+        to_keep = all_msgs[-keep_last:]
+
+        # Build summarization prompt
+        transcript = []
+        for m in to_summarize:
+            role = (m.role or "user").strip()
+            content = (m.content or "").strip()
+            if not content:
+                continue
+            transcript.append(f"{role.upper()}: {content}")
+
+        transcript_text = "\n".join(transcript)
+        if not transcript_text:
+            return
+
+        # If LLM is unavailable, do a crude truncation fallback.
+        if not self.enabled or not self.client:
+            existing = (conv.memory_summary or "").strip()
+            combined = (existing + "\n" + transcript_text).strip()
+            conv.memory_summary = combined[-6000:]
+            conv.updated_at = datetime.utcnow()
+            db.commit()
+        else:
+            system_prompt = """You are a conversation memory summarizer for a data center news assistant.
+Your job is to compress older chat turns into a brief factual memory that helps future turns stay on-topic.
+
+Rules:
+- Be brief and factual.
+- Use bullets only.
+- Capture: user goals, preferences (audience/tone), key entities (companies/technologies/regions), and any constraints (time windows, rack density, MW, cooling type).
+- Do NOT add new facts beyond the transcript.
+- Do NOT include URLs.
+"""
+            existing = (conv.memory_summary or "").strip()
+            user_prompt = f"""Existing memory (if any):
+{existing if existing else "(none)"}
+
+New transcript to fold into memory:
+{transcript_text}
+
+Write the updated memory summary as 6-14 bullet points."""
+            try:
+                summary = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=350, temperature=0.2).strip()
+            except Exception:
+                summary = ""
+            if summary:
+                conv.memory_summary = summary
+                conv.updated_at = datetime.utcnow()
+                db.commit()
+
+        # Prune older messages (delete everything except to_keep)
+        keep_ids = {m.id for m in to_keep if m.id}
+        if keep_ids:
+            db.query(Message).filter(
+                Message.conversation_id == conv.id,
+                ~Message.id.in_(keep_ids),
+            ).delete(synchronize_session=False)
+            db.commit()
+
+    def _router(self, query: str) -> Dict[str, Any]:
+        """
+        Lightweight intent + constraint router.
+        This is intentionally heuristic-first to keep it cheap.
+        """
+        q = (query or "").strip()
+        ql = q.lower()
+
+        intent = "news_update"
+        if any(k in ql for k in ["compare", "vs", "versus"]):
+            intent = "compare"
+        elif any(k in ql for k in ["recommend", "should we", "what should i", "what do you recommend"]):
+            intent = "recommend"
+        elif any(k in ql for k in ["explain", "what is", "how does", "definition"]):
+            intent = "explain_concept"
+        elif any(k in ql for k in ["forecast", "predict", "next 12 months", "outlook"]):
+            intent = "forecast"
+        elif any(k in ql for k in ["deal", "raise", "funding", "acquisition", "m&a"]):
+            intent = "deal_monitor"
+        elif any(k in ql for k in ["deep dive", "profile", "winners", "who are the winners", "who's winning", "leader"]):
+            intent = "deep_dive_company"
+
+        # Extract constraints
+        constraints: Dict[str, Any] = {}
+
+        mw = re.findall(r"(\d+(?:\.\d+)?)\s*mw\b", ql)
+        if mw:
+            constraints["power_mw"] = [float(x) for x in mw[:3]]
+
+        kw = re.findall(r"(\d+(?:\.\d+)?)\s*kw\b", ql)
+        if kw:
+            constraints["rack_kw"] = [float(x) for x in kw[:3]]
+
+        days = re.findall(r"last\s+(\d+)\s+days", ql)
+        if days:
+            constraints["time_window_days"] = int(days[0])
+
+        cooling = []
+        for k, label in [
+            ("direct-to-chip", "direct_to_chip"),
+            ("d2c", "direct_to_chip"),
+            ("immersion", "immersion"),
+            ("liquid cooling", "liquid_cooling"),
+            ("rear door", "rear_door_hx"),
+            ("crac", "facility_hvac"),
+            ("crah", "facility_hvac"),
+            ("chiller", "facility_hvac"),
+        ]:
+            if k in ql:
+                cooling.append(label)
+        if cooling:
+            constraints["cooling_type"] = sorted(set(cooling))
+
+        # Ambiguity detection: short, broad prompts without obvious anchors.
+        ambiguous_topics = ["cooling innovations", "power constraints", "chip supply", "ai data centers", "site selection"]
+        high_ambiguity = (len(ql.split()) <= 3) or any(t == ql for t in ambiguous_topics)
+
+        clarifying_question = None
+        if high_ambiguity and intent in {"news_update", "explain_concept"}:
+            if "cooling" in ql:
+                clarifying_question = "Quick clarifier: are you asking about facility cooling (chillers/CRAH/heat rejection) or chip-level cooling (direct-to-chip/immersion), and what rack density range (e.g., 20–40kW vs 60–100kW+)?"
+            elif "power" in ql or "grid" in ql:
+                clarifying_question = "Quick clarifier: which region/market (e.g., N. Virginia, DFW, Phoenix) and are you focused on near-term interconnect delays or longer-term capacity buildout?"
+            else:
+                clarifying_question = "Quick clarifier: what specific segment (hyperscalers vs colos vs enterprise) and what time window (last 7 days vs last 30 days) should I focus on?"
+
+        return {
+            "intent": intent,
+            "constraints": constraints,
+            "clarifying_question": clarifying_question,
+        }
 
     def _select_chat_model(self) -> str:
         if self.provider == "groq":
@@ -572,7 +779,15 @@ Items:
 
         return inserted_total
     
-    def generate_response(self, query: str, context_articles: List[Dict]) -> Dict:
+    def generate_response(
+        self,
+        query: str,
+        context_articles: List[Dict],
+        *,
+        audience: Optional[str] = None,
+        memory_summary: Optional[str] = None,
+        recent_messages: Optional[List[Message]] = None,
+    ) -> Dict:
         """Generate AI response using retrieved context"""
         if not self.enabled:
             return {
@@ -601,40 +816,68 @@ Items:
                 'source': article['source'],
             })
         
-        # Stronger "expert helper" prompt: always synthesize and summarize first.
-        system_prompt = """You are an expert data center industry analyst and operator-adjacent assistant.
+        # Rundown-style by default. Force citations for any source-backed factual claim.
+        system_prompt = """You are Data Center Rundown-style analyst: concise, high-signal, synthesis-first.
 
-Your job is to synthesize and summarize, not just quote.
+Hard rules:
+- Use ONLY the provided articles + conversation context.
+- Do NOT paste raw URLs in the body.
+- Every factual claim tied to an article must carry at least one inline citation like [1].
+- If retrieval is weak or stale, explicitly say so (e.g., "I’m not seeing strong coverage in the last X days") and suggest what to search.
+- Adapt tone/depth to the requested audience: Exec, Investor, Operator, Engineer/Architect, Sustainability, Vendor.
 
-Rules:
-- Use ONLY the provided articles.
-- Do not speculate or add outside facts.
-- Cite using bracketed numbers like [1], [2] that refer to the Sources list below.
-- Do NOT paste full URLs in the answer (the UI already shows the source links).
-- If the articles don't contain an answer, say what is missing and suggest the best next question to ask.
+Output format exactly:
+## What changed recently
+<3-6 bullets>
 
-Output format:
-## Executive summary
-<2-5 bullets that directly answer the question>
+## Themes
+### <Theme 1>
+<2-4 bullets>
+### <Theme 2>
+<2-4 bullets>
+### <Theme 3>
+<2-4 bullets>
+(3-5 themes total, only if supported by sources)
 
-## Key details (from sources)
-<bullets with numbers/locations/timelines when present>
+## Why it matters (for <audience>)
+<3-6 bullets>
 
-## What it means / implications
-<3-6 bullets: risks, opportunities, second-order effects>
+## If I were you
+<3 actionable next steps>
 
-## What to do next
-<3-6 bullets: actionable follow-ups>
+## Sources
+1. <Source title> — <Publisher>
+2. ...
 """
         
-        user_prompt = f"""Based on the following recent data center industry articles, please answer this question:
+        # Conversation context for continuity
+        aud = (audience or "Exec").strip()
+        mem = (memory_summary or "").strip()
+        convo_lines = []
+        for m in (recent_messages or []):
+            role = (m.role or "").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            content = (m.content or "").strip()
+            if not content:
+                continue
+            convo_lines.append(f"{role.upper()}: {content}")
+        convo_context = "\n".join(convo_lines[-12:])
 
-**Question:** {query}
+        user_prompt = f"""Audience: {aud}
 
-**Available Articles:**
+Conversation memory (may be empty):
+{mem if mem else "(none)"}
+
+Recent conversation turns:
+{convo_context if convo_context else "(none)"}
+
+Question: {query}
+
+Available Articles:
 {context_text}
 
-Provide a clear, informative answer based on these sources. Include specific details like company names, locations, capacity (MW), and dates when mentioned. Cite which sources support your answer."""
+Write a Rundown-style synthesis. Use citations like [1] that map to the Sources list you produce at the end."""
         
         try:
             # Check cost limits before making API call
@@ -668,22 +911,77 @@ Provide a clear, informative answer based on these sources. Include specific det
                 'sources': sources
             }
     
-    def chat(self, query: str, history: Optional[List[Dict]] = None, audience: Optional[str] = None) -> Dict:
-        """Main chat method: retrieve context and generate response (history/audience accepted for compatibility)."""
+    def chat(
+        self,
+        query: str,
+        history: Optional[List[Dict]] = None,
+        audience: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Dict:
+        """Main chat method: server-side memory + retrieval + Rundown-style synthesis."""
         # If no articles in database, provide helpful message
         db = SessionLocal()
         try:
+            conv = self._get_or_create_conversation(db, conversation_id=conversation_id, audience=audience)
+            cid = conv.id
+
+            # Persist the new user message
+            db.add(Message(
+                conversation_id=conv.id,
+                role="user",
+                content=query,
+                tokens_est=self._estimate_tokens(query),
+            ))
+            conv.updated_at = datetime.utcnow()
+            db.commit()
+
+            # Summarize/prune if needed
+            self._maybe_summarize_and_prune(db, conv=conv)
+
             total_articles = db.query(Article).count()
             if total_articles == 0:
                 return {
                     'answer': "I don't have any articles in my database yet. The scraper runs every 30 minutes to collect news. Please wait a bit and try again, or ask me a general question about data centers and I'll do my best to help!",
-                    'sources': []
+                    'sources': [],
+                    'conversation_id': conv.id,
+                    'suggested_followups': ["Trigger a scrape", "Ask for a weekly digest", "Ask about a specific market (e.g., DFW, N. Virginia)"],
                 }
         finally:
             db.close()
         
-        # Retrieve relevant articles
-        articles = self.retrieve_relevant_articles(query, n_results=8)
+        # Router step (lightweight) to decide if we need a single clarifier.
+        db = SessionLocal()
+        try:
+            conv = db.query(Conversation).filter(Conversation.id == cid).first()
+            if not conv:
+                conv = self._get_or_create_conversation(db, conversation_id=cid, audience=audience)
+            route = self._router(query)
+            if route.get("clarifying_question"):
+                clarifier = str(route["clarifying_question"]).strip()
+                db.add(Message(
+                    conversation_id=conv.id,
+                    role="assistant",
+                    content=clarifier,
+                    tokens_est=self._estimate_tokens(clarifier),
+                ))
+                conv.updated_at = datetime.utcnow()
+                db.commit()
+                return {
+                    "answer": clarifier,
+                    "sources": [],
+                    "conversation_id": conv.id,
+                    "suggested_followups": [],
+                }
+
+            # Load memory + last N turns for continuity
+            recent_messages = self._load_recent_messages(db, conversation_id=conv.id, limit=12)
+            memory_summary = (conv.memory_summary or "").strip() or None
+            aud = (audience or conv.audience or "Exec").strip()
+        finally:
+            db.close()
+
+        # Retrieve more candidates to support themes, then let the LLM cluster/synthesize.
+        articles = self.retrieve_relevant_articles(query, n_results=40)
         
         # Proactive fallback: if it's a location question and we didn't retrieve any location hits,
         # try to fetch a few fresh, location-specific items and re-run retrieval once.
@@ -697,13 +995,57 @@ Provide a clear, informative answer based on these sources. Include specific det
             if not have_loc:
                 inserted = self._proactive_fetch(query)
                 if inserted > 0:
-                    articles = self.retrieve_relevant_articles(query, n_results=8)
+                    articles = self.retrieve_relevant_articles(query, n_results=40)
         
         if not articles:
+            # Persist assistant reply
+            db = SessionLocal()
+            try:
+                conv = self._get_or_create_conversation(db, conversation_id=cid, audience=audience)
+                msg = "I couldn't find any strong coverage for that query. Try specifying a time window (last 7–30 days), region/market, and any constraints (MW, rack kW, cooling type)."
+                db.add(Message(conversation_id=conv.id, role="assistant", content=msg, tokens_est=self._estimate_tokens(msg)))
+                conv.updated_at = datetime.utcnow()
+                db.commit()
+            finally:
+                db.close()
             return {
-                'answer': "I couldn't find any articles matching your query. Try asking about data center news, trends, or industry updates. The scraper collects new articles every 30 minutes.",
-                'sources': []
+                'answer': "I couldn't find any strong coverage for that query. Try specifying a time window (last 7–30 days), region/market, and any constraints (MW, rack kW, cooling type).",
+                'sources': [],
+                'conversation_id': cid,
+                'suggested_followups': ["Last 7 days", "Focus on a specific market", "Compare two cooling options for a rack density"],
             }
         
         # Generate response
-        return self.generate_response(query, articles)
+        result = self.generate_response(
+            query,
+            articles[:25],  # cap context size
+            audience=aud,
+            memory_summary=memory_summary,
+            recent_messages=recent_messages,
+        )
+
+        # Persist assistant reply
+        db = SessionLocal()
+        try:
+            conv = self._get_or_create_conversation(db, conversation_id=cid, audience=aud)
+            ans = (result.get("answer") or "").strip()
+            if ans:
+                db.add(Message(
+                    conversation_id=conv.id,
+                    role="assistant",
+                    content=ans,
+                    tokens_est=self._estimate_tokens(ans),
+                ))
+                conv.updated_at = datetime.utcnow()
+                db.commit()
+            result["conversation_id"] = conv.id
+            # Basic follow-up suggestions (cheap heuristic)
+            result["suggested_followups"] = [
+                "Compare two approaches in more detail",
+                "Who are the winners / leading vendors?",
+                "What should I watch over the next 30–90 days?",
+            ]
+        finally:
+            db.close()
+
+        return result

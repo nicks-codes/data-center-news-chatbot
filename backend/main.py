@@ -126,10 +126,13 @@ class ChatRequest(BaseModel):
     query: str
     history: list = []
     audience: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list
+    conversation_id: Optional[str] = None
+    suggested_followups: Optional[list] = None
 
 class SummaryResponse(BaseModel):
     article_id: int
@@ -177,8 +180,9 @@ async def chat(request: ChatRequest):
         
         result = chat_service.chat(
             request.query.strip(),
-            history=request.history or [],
+            history=request.history or [],  # backwards-compatible; server-side memory is preferred
             audience=request.audience,
+            conversation_id=request.conversation_id,
         )
         return ChatResponse(**result)
     except Exception as e:

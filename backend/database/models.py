@@ -1,8 +1,9 @@
 """
 Database models for articles
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index, ForeignKey
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from .db import Base
 
 class Article(Base):
@@ -34,3 +35,34 @@ class Article(Base):
     
     def __repr__(self):
         return f"<Article(id={self.id}, title='{self.title[:50]}...', source='{self.source}')>"
+
+
+class Conversation(Base):
+    """
+    Server-side persisted conversation state.
+    Use a UUID string id so clients can store it safely.
+    """
+    __tablename__ = "conversations"
+
+    id = Column(String(36), primary_key=True, index=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    audience = Column(String(50), nullable=True, index=True)
+    memory_summary = Column(Text, nullable=True)
+
+    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+
+
+class Message(Base):
+    """Persisted message turns for a conversation."""
+    __tablename__ = "messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    role = Column(String(20), nullable=False, index=True)  # user / assistant
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+    tokens_est = Column(Integer, nullable=True)
+
+    conversation = relationship("Conversation", back_populates="messages")
