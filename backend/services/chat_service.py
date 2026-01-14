@@ -409,6 +409,7 @@ Write the updated memory summary as 6-14 bullet points."""
         ql = q.lower()
 
         intent = "news_update"
+        mode: Optional[str] = None
         if any(k in ql for k in ["compare", "vs", "versus"]):
             intent = "compare"
         elif any(k in ql for k in ["recommend", "should we", "what should i", "what do you recommend"]):
@@ -421,6 +422,10 @@ Write the updated memory summary as 6-14 bullet points."""
             intent = "deal_monitor"
         elif any(k in ql for k in ["deep dive", "profile", "winners", "who are the winners", "who's winning", "leader"]):
             intent = "deep_dive_company"
+
+        # Special mode: construction projects roundup
+        if any(k in ql for k in ["construction projects", "latest construction projects", "data center construction", "new builds", "breaking ground"]):
+            mode = "construction_projects"
 
         # Extract constraints
         constraints: Dict[str, Any] = {}
@@ -470,7 +475,140 @@ Write the updated memory summary as 6-14 bullet points."""
             "intent": intent,
             "constraints": constraints,
             "clarifying_question": clarifying_question,
+            "mode": mode,
         }
+
+    def _clean_rundown_answer(self, answer: str, *, audience: str) -> str:
+        """
+        Enforce clean, scannable Rundown layout:
+        - Remove any Sources section (API returns sources separately)
+        - Normalize bullets to "- "
+        - Keep only allowed headers and bounded bullets/themes
+        """
+        raw = (answer or "").strip()
+        if not raw:
+            return raw
+
+        # Hard remove any trailing sources section
+        lines = raw.splitlines()
+        cut_idx = None
+        for i, ln in enumerate(lines):
+            if ln.strip().lower().startswith("## sources"):
+                cut_idx = i
+                break
+        if cut_idx is not None:
+            lines = lines[:cut_idx]
+
+        # Normalize bullet markers "* " -> "- "
+        norm = []
+        for ln in lines:
+            s = ln.rstrip()
+            if s.lstrip().startswith("* "):
+                indent = s[: len(s) - len(s.lstrip())]
+                s = indent + "- " + s.lstrip()[2:]
+            norm.append(s)
+        lines = norm
+
+        aud = (audience or "Exec").strip()
+        allowed_headers = {
+            "## what changed recently": "## What changed recently",
+            "## themes": "## Themes",
+            "## why it matters": f"## Why it matters (for {aud})",
+            "## why it matters (for": f"## Why it matters (for {aud})",
+            "## if i were you": "## If I were you",
+        }
+
+        out: List[str] = []
+        section = None  # what/themes/why/if
+        what_bullets = 0
+        why_bullets = 0
+        if_bullets = 0
+        theme_count = 0
+        theme_bullets = 0
+        in_themes = False
+
+        def push_blank():
+            if out and out[-1].strip() != "":
+                out.append("")
+
+        for ln in lines:
+            t = (ln or "").strip()
+            if not t:
+                continue
+
+            tl = t.lower()
+            if tl.startswith("## "):
+                # Normalize known headers; drop unknown ones to reduce spam
+                key = None
+                for k in allowed_headers.keys():
+                    if tl.startswith(k):
+                        key = k
+                        break
+                if not key:
+                    continue
+
+                hdr = allowed_headers[key]
+                # Ensure stable order by just writing as we encounter; model is usually ordered already.
+                push_blank()
+                out.append(hdr if hdr != "## Why it matters" else hdr)
+                section = "themes" if hdr.lower() == "## themes" else (
+                    "what" if hdr.lower() == "## what changed recently" else (
+                        "why" if hdr.lower().startswith("## why it matters") else "if"
+                    )
+                )
+                in_themes = (section == "themes")
+                if section == "themes":
+                    theme_count = 0
+                    theme_bullets = 0
+                continue
+
+            # Theme subheaders only within Themes
+            if t.startswith("###"):
+                if not in_themes:
+                    continue
+                if theme_count >= 3:
+                    continue
+                push_blank()
+                out.append(t)
+                theme_count += 1
+                theme_bullets = 0
+                continue
+
+            # Keep only dash bullets
+            if t.startswith("- "):
+                if section == "what":
+                    if what_bullets >= 5:
+                        continue
+                    out.append(t)
+                    what_bullets += 1
+                    continue
+                if section == "why":
+                    if why_bullets >= 3:
+                        continue
+                    out.append(t)
+                    why_bullets += 1
+                    continue
+                if section == "if":
+                    if if_bullets >= 3:
+                        continue
+                    out.append(t)
+                    if_bullets += 1
+                    continue
+                if section == "themes":
+                    # Only include bullets if we have at least one theme header already
+                    if theme_count <= 0:
+                        continue
+                    if theme_bullets >= 3:
+                        continue
+                    out.append(t)
+                    theme_bullets += 1
+                    continue
+                continue
+
+            # Drop other prose lines to keep it scannable
+            continue
+
+        return "\n".join(out).strip()
 
     def _select_chat_model(self) -> str:
         if self.provider == "groq":
@@ -862,30 +1000,32 @@ Hard rules:
 - Every factual claim tied to an article must carry at least one inline citation like [1] that refers to the provided Sources list.
 - If retrieval is weak or stale, explicitly say so (e.g., "I’m not seeing strong coverage in the last X days") and suggest what to search.
 - Adapt tone/depth to the requested audience: Exec, Investor, Operator, Engineer/Architect, Sustainability, Vendor.
-- In the final "Sources" section, reproduce the provided Sources list exactly (same numbering, no reordering, no URLs).
+- Use ONLY dash bullets: every bullet line MUST start with "- " (dash + space). Do not use "*" bullets.
+- Do NOT include a "Sources" section in the answer (sources are shown separately in the UI). Only cite inline like [1].
+
+Length limits (strict):
+- "What changed recently": max 5 bullets.
+- "Themes": max 3 themes, max 3 bullets per theme.
+- "Why it matters": max 3 bullets.
+- "If I were you": max 3 bullets.
 
 Output format exactly:
 ## What changed recently
-<3-6 bullets>
+<bullets only>
 
 ## Themes
 ### <Theme 1>
-<2-4 bullets>
+<bullets only>
 ### <Theme 2>
-<2-4 bullets>
+<bullets only>
 ### <Theme 3>
-<2-4 bullets>
-(3-5 themes total, only if supported by sources)
+<bullets only>
 
 ## Why it matters (for <audience>)
-<3-6 bullets>
+<bullets only>
 
 ## If I were you
-<3 actionable next steps>
-
-## Sources
-1. <Source title> — <Publisher>
-2. ...
+<bullets only>
 """
         
         # Conversation context for continuity
@@ -917,7 +1057,12 @@ Output format exactly:
 
         sources_block = "\n".join([f"{i}. {s['title']} — {s['source']}" for i, s in enumerate(sources, 1)])
 
+        # Lightweight mode hinting (construction projects)
+        query_lower = (query or "").lower()
+        construction_mode = any(k in query_lower for k in ["construction projects", "latest construction projects", "data center construction", "breaking ground", "new builds"])
+
         user_prompt = f"""Audience: {aud}
+Mode: {"construction_projects" if construction_mode else "default"}
 
 Recency note: newest provided item is {newest_days if newest_days is not None else "unknown"} days old.
 
@@ -935,7 +1080,15 @@ Available Articles:
 Sources list to cite (do not reorder, do not add URLs):
 {sources_block}
 
-Write a Rundown-style synthesis. Use citations like [1] that refer to the Sources list above. In your final "Sources" section, reproduce that same list exactly."""
+Task:
+- Write the Rundown-style sections exactly as specified.
+- Use inline citations like [1] that refer to the sources list above.
+- Do NOT include a Sources section in the answer body.
+
+Construction projects mode instructions (only if Mode=construction_projects):
+- In "What changed recently", every bullet should be a concrete project item (company/project name — location — size/capex/MW if stated) with a citation.
+- If size/capex/MW isn't in sources, omit it (do not invent).
+"""
         
         try:
             # Check cost limits before making API call
@@ -950,7 +1103,8 @@ Write a Rundown-style synthesis. Use citations like [1] that refer to the Source
                         'sources': []
                     }
 
-            answer = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=900, temperature=0.35)
+            answer = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=850, temperature=0.25)
+            answer = self._clean_rundown_answer(answer, audience=aud)
             
             return {
                 'answer': answer,

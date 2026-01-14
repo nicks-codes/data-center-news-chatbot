@@ -417,6 +417,11 @@ body {
     color: var(--text-secondary);
 }
 
+/* Preserve section breaks in assistant markdown */
+.md-break {
+    height: 0.85rem;
+}
+
 /* Sources */
 .sources {
     margin-top: 1rem;
@@ -453,6 +458,36 @@ body {
     margin-bottom: 0.5rem;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.sources-count {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: rgba(100, 116, 139, 0.9);
+    background: rgba(100, 116, 139, 0.08);
+    border: 1px solid rgba(100, 116, 139, 0.18);
+    border-radius: 999px;
+    padding: 0.1rem 0.45rem;
+}
+
+.sources-toggle {
+    margin-top: 0.5rem;
+    border: 1px solid var(--border-color);
+    background: #f8fafc;
+    color: var(--text-primary);
+    border-radius: 10px;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.sources-toggle:hover {
+    background: #eef2ff;
+    border-color: rgba(37, 99, 235, 0.35);
 }
 
 .source-item {

@@ -270,16 +270,45 @@ function addMessage(content, role, sources = [], followups = []) {
     
     let sourcesHtml = '';
     if (sources && sources.length > 0) {
+        // Deduplicate by URL and cap to 10 unless expanded.
+        const seen = new Set();
+        const unique = [];
+        for (const s of sources) {
+            const u = (s && s.url) ? String(s.url) : '';
+            if (!u || seen.has(u)) continue;
+            seen.add(u);
+            unique.push(s);
+        }
+
+        const maxShown = 10;
+        const shown = unique.slice(0, maxShown);
+        const hiddenCount = Math.max(0, unique.length - shown.length);
+
         sourcesHtml = `
-            <div class="sources">
-                <div class="sources-header">📚 Sources</div>
-                ${sources.map((source, idx) => `
-                    <a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer" class="source-item">
-                        <span class="source-idx">[${idx + 1}]</span>
-                        <span class="source-title">${escapeHtml(source.title)}</span>
-                        <span class="source-name">${escapeHtml(source.source)}</span>
-                    </a>
-                `).join('')}
+            <div class="sources" data-expanded="false" data-hidden-count="${hiddenCount}">
+                <div class="sources-header">
+                    <span>Sources</span>
+                    <span class="sources-count">${shown.length}${hiddenCount ? `/${unique.length}` : ''}</span>
+                </div>
+                <div class="sources-list">
+                    ${shown.map((source, idx) => `
+                        <a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer" class="source-item">
+                            <span class="source-idx">[${idx + 1}]</span>
+                            <span class="source-title">${escapeHtml(source.title)}</span>
+                            <span class="source-name">${escapeHtml(source.source)}</span>
+                        </a>
+                    `).join('')}
+                </div>
+                ${hiddenCount ? `<button type="button" class="sources-toggle">Show ${hiddenCount} more</button>` : ''}
+                <template class="sources-hidden-template">
+                    ${unique.slice(maxShown).map((source, idx) => `
+                        <a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer" class="source-item">
+                            <span class="source-idx">[${maxShown + idx + 1}]</span>
+                            <span class="source-title">${escapeHtml(source.title)}</span>
+                            <span class="source-name">${escapeHtml(source.source)}</span>
+                        </a>
+                    `).join('')}
+                </template>
             </div>
         `;
     }
@@ -306,6 +335,35 @@ function addMessage(content, role, sources = [], followups = []) {
     `;
     
     chatMessages.appendChild(messageEl);
+
+    // Wire up sources expand/collapse
+    const sourcesEl = messageEl.querySelector('.sources');
+    if (sourcesEl) {
+        const toggle = sourcesEl.querySelector('.sources-toggle');
+        const list = sourcesEl.querySelector('.sources-list');
+        const tpl = sourcesEl.querySelector('.sources-hidden-template');
+        if (toggle && list && tpl) {
+                    toggle.addEventListener('click', () => {
+                const expanded = sourcesEl.getAttribute('data-expanded') === 'true';
+                        const hiddenCount = parseInt(sourcesEl.getAttribute('data-hidden-count') || '0', 10) || 0;
+                if (!expanded) {
+                    list.insertAdjacentHTML('beforeend', tpl.innerHTML);
+                    sourcesEl.setAttribute('data-expanded', 'true');
+                    toggle.textContent = 'Show less';
+                } else {
+                    // Rebuild list to first 10 only
+                    const items = list.querySelectorAll('.source-item');
+                    items.forEach((el, idx) => {
+                        if (idx >= 10) el.remove();
+                    });
+                    sourcesEl.setAttribute('data-expanded', 'false');
+                            toggle.textContent = hiddenCount ? `Show ${hiddenCount} more` : 'Show more';
+                }
+                scrollToBottom();
+            });
+        }
+    }
+
     // Wire up follow-up chip clicks
     if (role === 'assistant') {
         const chips = messageEl.querySelectorAll('.followup-chip');
@@ -400,6 +458,8 @@ function renderAssistantMarkdown(text) {
 
         if (!trimmed) {
             closeLists();
+            // Preserve section breaks between blocks
+            html += '<div class="md-break"></div>';
             continue;
         }
 
