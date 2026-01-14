@@ -178,8 +178,9 @@ function addMessage(content, role, sources = []) {
         sourcesHtml = `
             <div class="sources">
                 <div class="sources-header">📚 Sources</div>
-                ${sources.map(source => `
-                    <a href="${escapeHtml(source.url)}" target="_blank" rel="noopener" class="source-item">
+                ${sources.map((source, idx) => `
+                    <a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer" class="source-item">
+                        <span class="source-idx">[${idx + 1}]</span>
                         <span class="source-title">${escapeHtml(source.title)}</span>
                         <span class="source-name">${escapeHtml(source.source)}</span>
                     </a>
@@ -196,13 +197,6 @@ function addMessage(content, role, sources = []) {
     `;
     
     chatMessages.appendChild(messageEl);
-    // Ensure links in assistant markdown open safely in a new tab
-    if (role === 'assistant') {
-        messageEl.querySelectorAll('.message-content a').forEach(a => {
-            a.setAttribute('target', '_blank');
-            a.setAttribute('rel', 'noopener noreferrer');
-        });
-    }
     scrollToBottom();
 }
 
@@ -261,27 +255,118 @@ function escapeHtml(text) {
 function renderAssistantMarkdown(text) {
     const raw = (text || '').toString();
 
-    // If markdown libs aren't available, fall back to simple paragraph formatting.
-    if (!window.marked || !window.DOMPurify) {
-        return raw
-            .split('\n')
-            .filter(p => p.trim())
-            .map(p => `<p>${escapeHtml(p)}</p>`)
-            .join('');
+    // Markdown-lite renderer (no CDN deps, safe by default)
+    const lines = raw.split(/\r?\n/);
+    let html = '';
+    let inUl = false;
+    let inOl = false;
+
+    const closeLists = () => {
+        if (inUl) {
+            html += '</ul>';
+            inUl = false;
+        }
+        if (inOl) {
+            html += '</ol>';
+            inOl = false;
+        }
+    };
+
+    for (const originalLine of lines) {
+        const line = (originalLine || '').replace(/\s+$/, '');
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+            closeLists();
+            continue;
+        }
+
+        // Headings
+        const h3 = trimmed.match(/^##\s+(.*)$/);
+        const h4 = trimmed.match(/^###\s+(.*)$/);
+        if (h4) {
+            closeLists();
+            html += `<h3>${renderInline(h4[1])}</h3>`;
+            continue;
+        }
+        if (h3) {
+            closeLists();
+            html += `<h2>${renderInline(h3[1])}</h2>`;
+            continue;
+        }
+
+        // Bullets
+        const ul = trimmed.match(/^[-*]\s+(.*)$/);
+        if (ul) {
+            if (inOl) {
+                html += '</ol>';
+                inOl = false;
+            }
+            if (!inUl) {
+                html += '<ul>';
+                inUl = true;
+            }
+            html += `<li>${renderInline(ul[1])}</li>`;
+            continue;
+        }
+
+        // Numbered list
+        const ol = trimmed.match(/^\d+\.\s+(.*)$/);
+        if (ol) {
+            if (inUl) {
+                html += '</ul>';
+                inUl = false;
+            }
+            if (!inOl) {
+                html += '<ol>';
+                inOl = true;
+            }
+            html += `<li>${renderInline(ol[1])}</li>`;
+            continue;
+        }
+
+        closeLists();
+        html += `<p>${renderInline(trimmed)}</p>`;
     }
 
-    // Configure for readable chat output
-    window.marked.setOptions({
-        gfm: true,
-        breaks: true,
-        headerIds: false,
-        mangle: false,
+    closeLists();
+    return html;
+}
+
+function renderInline(raw) {
+    // 1) Handle inline code by splitting on backticks
+    const parts = String(raw || '').split('`');
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+        const escaped = escapeHtml(parts[i]);
+        if (i % 2 === 1) {
+            out += `<code>${escaped}</code>`;
+        } else {
+            out += escaped;
+        }
+    }
+
+    // 2) Bold **text**
+    out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    // 3) Turn bare URLs into short links (prevents insane horizontal scroll)
+    out = out.replace(/https?:\/\/[^\s)]+/g, (url) => {
+        let label = url;
+        try {
+            const u = new URL(url);
+            label = u.hostname;
+        } catch (_) {
+            label = url.length > 32 ? url.slice(0, 29) + '…' : url;
+        }
+        const safeUrl = escapeHtml(url);
+        const safeLabel = escapeHtml(label);
+        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
     });
 
-    const html = window.marked.parse(raw);
-    return window.DOMPurify.sanitize(html, {
-        USE_PROFILES: { html: true },
-    });
+    // 4) Style citations like [1]
+    out = out.replace(/\[(\d+)\]/g, '<span class="cite">[$1]</span>');
+
+    return out;
 }
 
 // Handle Enter key in input

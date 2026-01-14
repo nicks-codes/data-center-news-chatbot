@@ -609,7 +609,8 @@ Your job is to synthesize and summarize, not just quote.
 Rules:
 - Use ONLY the provided articles.
 - Do not speculate or add outside facts.
-- When you state a key claim, include (Source + URL) on the same bullet/line.
+- Cite using bracketed numbers like [1], [2] that refer to the Sources list below.
+- Do NOT paste full URLs in the answer (the UI already shows the source links).
 - If the articles don't contain an answer, say what is missing and suggest the best next question to ask.
 
 Output format:

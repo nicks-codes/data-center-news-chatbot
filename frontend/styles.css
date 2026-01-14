@@ -280,6 +280,8 @@ body {
 
 .message-content {
     line-height: 1.7;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .message-content p {
@@ -308,6 +310,18 @@ body {
     font-size: 1rem;
     font-weight: 700;
     color: var(--text-primary);
+}
+
+.message.assistant .message-content .cite {
+    display: inline-block;
+    font-weight: 600;
+    color: var(--primary-dark);
+    background: rgba(37, 99, 235, 0.08);
+    border: 1px solid rgba(37, 99, 235, 0.18);
+    border-radius: 6px;
+    padding: 0.05rem 0.35rem;
+    margin: 0 0.1rem;
+    white-space: nowrap;
 }
 
 .message.assistant .message-content ul,
@@ -388,9 +402,24 @@ body {
     background: var(--border-color);
 }
 
+.source-item .source-idx {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--primary-dark);
+    background: rgba(37, 99, 235, 0.08);
+    border: 1px solid rgba(37, 99, 235, 0.18);
+    border-radius: 6px;
+    padding: 0.05rem 0.35rem;
+    margin-right: 0.4rem;
+    vertical-align: middle;
+}
+
 .source-item .source-title {
     font-weight: 500;
     display: block;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .source-item .source-name {
