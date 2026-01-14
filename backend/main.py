@@ -15,6 +15,11 @@ from datetime import datetime
 from .services.chat_service import ChatService
 from .scheduler import ScrapingScheduler
 from .services.text_chunker import chunk_text
+from .database.db import SessionLocal
+from .database.models import Article
+from .scrapers.newsletter_scraper import NewsletterScraper
+import json
+from uuid import uuid4
 
 # Load .env early to ensure all services can access it
 from pathlib import Path
@@ -153,6 +158,19 @@ class DigestResponse(BaseModel):
     sources: list
     meta: Any
 
+class NewsletterUploadRequest(BaseModel):
+    title: str
+    content: str
+    content_type: Optional[str] = "auto"  # auto | html | text
+    published_date: Optional[str] = None  # ISO date (optional)
+    source: Optional[str] = "Data Center Rundown"
+
+class NewsletterUploadResponse(BaseModel):
+    article_id: int
+    title: str
+    stored: bool
+    links_found: int
+
 @app.get("/")
 async def root():
     """Serve the frontend"""
@@ -188,6 +206,60 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/newsletter/upload", response_model=NewsletterUploadResponse)
+async def upload_newsletter(request: NewsletterUploadRequest):
+    """
+    Manual newsletter ingestion endpoint.
+    Stores the issue as an Article with source_type='newsletter'.
+    Extracted links are stored in Article.tags as JSON metadata (not in the content prompt).
+    """
+    if not request.title or not request.title.strip():
+        raise HTTPException(status_code=400, detail="title is required")
+    if not request.content or not request.content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+
+    scraper = NewsletterScraper()
+    parsed = scraper.parse(title=request.title, raw_content=request.content, content_type=request.content_type or "auto")
+
+    published_dt = None
+    if request.published_date:
+        try:
+            published_dt = datetime.fromisoformat(request.published_date.replace("Z", "+00:00"))
+        except Exception:
+            published_dt = None
+    if not published_dt and parsed.detected_date:
+        published_dt = parsed.detected_date
+
+    # Ensure URL uniqueness
+    date_part = (published_dt.date().isoformat() if published_dt else datetime.utcnow().date().isoformat())
+    url = f"newsletter://{date_part}/{uuid4()}"
+
+    db = SessionLocal()
+    try:
+        a = Article(
+            title=parsed.title,
+            content=parsed.content_text,
+            url=url,
+            source=(request.source or "Data Center Rundown"),
+            source_type="newsletter",
+            published_date=published_dt,
+            author=None,
+            tags=json.dumps({"newsletter_links": parsed.extracted_links}),
+            has_embedding=False,
+        )
+        db.add(a)
+        db.commit()
+        db.refresh(a)
+        return NewsletterUploadResponse(
+            article_id=a.id,
+            title=a.title,
+            stored=True,
+            links_found=len(parsed.extracted_links),
+        )
+    finally:
+        db.close()
 
 @app.get("/api/stats")
 async def get_stats():

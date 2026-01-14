@@ -189,6 +189,53 @@ body {
     border-bottom: 1px solid var(--border-color);
 }
 
+.chat-header-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.chat-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.audience-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.audience-select {
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: white;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+}
+
+.new-chat-btn {
+    padding: 0.6rem 0.85rem;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: #f8fafc;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.new-chat-btn:hover {
+    background: #eef2ff;
+    border-color: rgba(37, 99, 235, 0.35);
+}
+
 .chat-header h2 {
     font-size: 1.25rem;
     font-weight: 600;
@@ -375,6 +422,28 @@ body {
     margin-top: 1rem;
     padding-top: 1rem;
     border-top: 1px solid var(--border-color);
+}
+
+/* Suggested follow-ups */
+.followups {
+    margin-top: 0.75rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.followup-chip {
+    border: 1px solid rgba(37, 99, 235, 0.25);
+    background: rgba(37, 99, 235, 0.06);
+    color: var(--primary-dark);
+    border-radius: 999px;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.followup-chip:hover {
+    background: rgba(37, 99, 235, 0.12);
 }
 
 .sources-header {

@@ -1,0 +1,123 @@
+[
+  {
+    "id": "p01",
+    "audience": "Exec",
+    "prompt": "Cooling innovations",
+    "expected": { "should_ask_clarifier": true, "max_clarifying_questions": 1 }
+  },
+  {
+    "id": "p02",
+    "audience": "Engineer",
+    "prompt": "Compare direct-to-chip vs immersion for 80kW racks",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p03",
+    "audience": "Investor",
+    "prompt": "Who are the winners in liquid cooling right now?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p04",
+    "audience": "Operator",
+    "prompt": "What changed recently in grid interconnect delays in N. Virginia?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p05",
+    "audience": "Sustainability",
+    "prompt": "Summarize the last 14 days of data center water and heat reuse signals",
+    "expected": { "should_ask_clarifier": false, "min_sources": 3, "requires_citations": true }
+  },
+  {
+    "id": "p06",
+    "audience": "Exec",
+    "prompt": "Data center site selection: what’s changing in the last 30 days?",
+    "expected": { "should_ask_clarifier": true, "max_clarifying_questions": 1 }
+  },
+  {
+    "id": "p07",
+    "audience": "Investor",
+    "prompt": "Track deals: any recent M&A or funding in power and cooling?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p08",
+    "audience": "Operator",
+    "prompt": "What should I do next if I’m planning 200MW in DFW and power is tight?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p09",
+    "audience": "Architect",
+    "prompt": "Explain rear-door heat exchangers vs CDU-based direct-to-chip: where each fits",
+    "expected": { "should_ask_clarifier": false, "min_sources": 1, "requires_citations": true }
+  },
+  {
+    "id": "p10",
+    "audience": "Vendor",
+    "prompt": "Give me a positioning memo: how to talk about liquid cooling ROI without overclaiming",
+    "expected": { "should_ask_clarifier": false, "min_sources": 1, "requires_citations": true }
+  },
+  {
+    "id": "p11",
+    "audience": "Exec",
+    "prompt": "What were the top themes in Rundown Jan 13 2026?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 1, "requires_citations": true }
+  },
+  {
+    "id": "p12",
+    "audience": "Investor",
+    "prompt": "Forecast: how will 2026 capex shift between power, cooling, and land?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p13",
+    "audience": "Engineer",
+    "prompt": "Compare 40kW vs 80kW rack design tradeoffs (power delivery, cooling, redundancy)",
+    "expected": { "should_ask_clarifier": false, "min_sources": 1, "requires_citations": true }
+  },
+  {
+    "id": "p14",
+    "audience": "Operator",
+    "prompt": "Any recent regulatory or permitting constraints affecting new builds?",
+    "expected": { "should_ask_clarifier": true, "max_clarifying_questions": 1 }
+  },
+  {
+    "id": "p15",
+    "audience": "Exec",
+    "prompt": "What changed recently with hyperscalers’ colocation strategy?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p16",
+    "audience": "Sustainability",
+    "prompt": "Compare sustainability narratives: water-positive vs carbon-free energy claims",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p17",
+    "audience": "Investor",
+    "prompt": "Deep dive: what’s happening with Vertiv and Schneider in liquid cooling?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 2, "requires_citations": true }
+  },
+  {
+    "id": "p18",
+    "audience": "Architect",
+    "prompt": "Clarify: facility cooling vs chip cooling — how should I frame the decision tree?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 1, "requires_citations": true }
+  },
+  {
+    "id": "p19",
+    "audience": "Exec",
+    "prompt": "Give me a 1-page rundown on power constraints and what to do next",
+    "expected": { "should_ask_clarifier": true, "max_clarifying_questions": 1 }
+  },
+  {
+    "id": "p20",
+    "audience": "Operator",
+    "prompt": "What should I monitor weekly for early warning on power availability?",
+    "expected": { "should_ask_clarifier": false, "min_sources": 1, "requires_citations": false }
+  }
+]
+

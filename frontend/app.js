@@ -7,6 +7,8 @@ const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const sendBtn = document.getElementById('send-btn');
+const audienceSelect = document.getElementById('audience-select');
+const newChatBtn = document.getElementById('new-chat-btn');
 const totalArticles = document.getElementById('total-articles');
 const indexedArticles = document.getElementById('indexed-articles');
 const providerInfo = document.getElementById('provider-info');
@@ -17,11 +19,16 @@ const sampleBtns = document.querySelectorAll('.sample-btn');
 // State
 let isLoading = false;
 let hasShownWelcome = false;
+let conversationId = localStorage.getItem('conversation_id') || null;
+let audience = localStorage.getItem('audience') || 'Exec';
+let transcript = [];
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     fetchStats();
     setupEventListeners();
+    restoreAudience();
+    restoreTranscript();
 });
 
 // Event Listeners
@@ -62,6 +69,78 @@ function setupEventListeners() {
     
     // Auto-refresh stats every 60 seconds
     setInterval(fetchStats, 60000);
+
+    if (audienceSelect) {
+        audienceSelect.addEventListener('change', () => {
+            audience = audienceSelect.value || 'Exec';
+            localStorage.setItem('audience', audience);
+        });
+    }
+
+    if (newChatBtn) {
+        newChatBtn.addEventListener('click', () => {
+            startNewChat();
+        });
+    }
+}
+
+function restoreAudience() {
+    if (!audienceSelect) return;
+    audienceSelect.value = audience || 'Exec';
+}
+
+function restoreTranscript() {
+    try {
+        const raw = localStorage.getItem('chat_transcript');
+        transcript = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(transcript) || transcript.length === 0) return;
+
+        // Remove welcome message and re-render transcript
+        const welcomeMsg = chatMessages.querySelector('.welcome-message');
+        if (welcomeMsg) welcomeMsg.remove();
+        hasShownWelcome = true;
+
+        for (const m of transcript) {
+            addMessage(m.content, m.role, m.sources || [], m.followups || []);
+        }
+    } catch (e) {
+        transcript = [];
+    }
+}
+
+function persistTranscriptItem(item) {
+    try {
+        transcript.push(item);
+        // Keep it bounded so localStorage doesn't explode
+        if (transcript.length > 60) transcript = transcript.slice(transcript.length - 60);
+        localStorage.setItem('chat_transcript', JSON.stringify(transcript));
+    } catch (e) {
+        // ignore
+    }
+}
+
+function startNewChat() {
+    conversationId = null;
+    localStorage.removeItem('conversation_id');
+    transcript = [];
+    localStorage.removeItem('chat_transcript');
+    chatMessages.innerHTML = `
+        <div class="welcome-message">
+            <div class="welcome-icon">🏢</div>
+            <h3>Welcome to the Data Center News Chatbot!</h3>
+            <p>I can answer questions about:</p>
+            <ul>
+                <li>📰 Latest data center news and developments</li>
+                <li>🏗️ Construction and expansion projects</li>
+                <li>💼 M&A activity and market trends</li>
+                <li>🌱 Sustainability initiatives</li>
+                <li>⚡ Technology innovations (cooling, power, AI)</li>
+            </ul>
+            <p class="welcome-tip">Try one of the sample questions or ask your own!</p>
+        </div>
+    `;
+    hasShownWelcome = false;
+    chatInput.focus();
 }
 
 // Fetch and display stats
@@ -116,6 +195,7 @@ async function handleChatSubmit(e) {
     
     // Add user message
     addMessage(query, 'user');
+    persistTranscriptItem({ role: 'user', content: query, sources: [], followups: [] });
     chatInput.value = '';
     
     // Show loading
@@ -129,7 +209,11 @@ async function handleChatSubmit(e) {
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ query }),
+            body: JSON.stringify({
+                query,
+                audience,
+                conversation_id: conversationId,
+            }),
         });
         
         if (!response.ok) {
@@ -137,12 +221,23 @@ async function handleChatSubmit(e) {
         }
         
         const data = await response.json();
+
+        if (data && data.conversation_id) {
+            conversationId = data.conversation_id;
+            localStorage.setItem('conversation_id', conversationId);
+        }
         
         // Remove loading
         loadingEl.remove();
         
         // Add assistant message
-        addMessage(data.answer, 'assistant', data.sources);
+        addMessage(data.answer, 'assistant', data.sources, data.suggested_followups || []);
+        persistTranscriptItem({
+            role: 'assistant',
+            content: data.answer,
+            sources: data.sources || [],
+            followups: data.suggested_followups || [],
+        });
         
     } catch (error) {
         console.error('Error sending message:', error);
@@ -156,7 +251,7 @@ async function handleChatSubmit(e) {
 }
 
 // Add a message to the chat
-function addMessage(content, role, sources = []) {
+function addMessage(content, role, sources = [], followups = []) {
     const messageEl = document.createElement('div');
     messageEl.className = `message ${role}`;
     
@@ -188,15 +283,42 @@ function addMessage(content, role, sources = []) {
             </div>
         `;
     }
+
+    let followupsHtml = '';
+    if (role === 'assistant' && followups && followups.length > 0) {
+        followupsHtml = `
+            <div class="followups">
+                ${followups.slice(0, 4).map((t) => `
+                    <button type="button" class="followup-chip" data-followup="${escapeHtml(String(t))}">
+                        ${escapeHtml(String(t))}
+                    </button>
+                `).join('')}
+            </div>
+        `;
+    }
     
     messageEl.innerHTML = `
         <div class="message-content">
             ${formattedContent}
         </div>
         ${sourcesHtml}
+        ${followupsHtml}
     `;
     
     chatMessages.appendChild(messageEl);
+    // Wire up follow-up chip clicks
+    if (role === 'assistant') {
+        const chips = messageEl.querySelectorAll('.followup-chip');
+        chips.forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const text = btn.getAttribute('data-followup') || '';
+                if (!text) return;
+                chatInput.value = text;
+                chatInput.focus();
+                chatForm.dispatchEvent(new Event('submit'));
+            });
+        });
+    }
     scrollToBottom();
 }
 
@@ -349,21 +471,7 @@ function renderInline(raw) {
     // 2) Bold **text**
     out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 
-    // 3) Turn bare URLs into short links (prevents insane horizontal scroll)
-    out = out.replace(/https?:\/\/[^\s)]+/g, (url) => {
-        let label = url;
-        try {
-            const u = new URL(url);
-            label = u.hostname;
-        } catch (_) {
-            label = url.length > 32 ? url.slice(0, 29) + '…' : url;
-        }
-        const safeUrl = escapeHtml(url);
-        const safeLabel = escapeHtml(label);
-        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
-    });
-
-    // 4) Style citations like [1]
+    // 3) Style citations like [1]
     out = out.replace(/\[(\d+)\]/g, '<span class="cite">[$1]</span>');
 
     return out;

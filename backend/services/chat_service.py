@@ -93,7 +93,7 @@ class ChatService:
     def retrieve_relevant_articles(self, query: str, n_results: int = 5) -> List[Dict]:
         """Retrieve relevant articles using semantic search or keyword fallback"""
         db = SessionLocal()
-        articles = []
+        articles: List[Dict[str, Any]] = []
         
         try:
             # Try semantic search first only if the vector store has data
@@ -110,10 +110,13 @@ class ChatService:
             
             if query_embedding:
                 similar_articles = self.vector_store.search_similar(query_embedding, n_results=max(n_results, 8))
-                
+
+                # Deduplicate by article_id/url, keeping the best (lowest distance) chunk per article.
+                best: Dict[str, Dict[str, Any]] = {}
                 for article_data in similar_articles:
                     metadata = article_data.get('metadata', {})
                     doc = article_data.get("document") or ""
+                    distance = article_data.get("distance")
 
                     # Prefer metadata (chunked indexing stores full provenance); fall back to DB lookup if needed.
                     title = metadata.get("title") or ""
@@ -141,14 +144,33 @@ class ChatService:
                     if not self._looks_like_datacenter_article(title, doc):
                         continue
 
-                    articles.append({
+                    key = str(metadata.get("article_id") or url)
+                    candidate = {
                         'title': title,
                         'content': doc[:2000],
                         'url': url,
                         'source': source,
                         'source_type': source_type,
                         'published_date': published_date,
-                    })
+                        'distance': distance,
+                    }
+                    prev = best.get(key)
+                    if prev is None:
+                        best[key] = candidate
+                    else:
+                        # Prefer smaller distance; if missing, keep the first.
+                        try:
+                            if distance is not None and (prev.get("distance") is None or float(distance) < float(prev.get("distance"))):
+                                best[key] = candidate
+                        except Exception:
+                            pass
+
+                articles = list(best.values())
+                articles.sort(key=lambda x: (x.get("distance") is None, x.get("distance") or 0.0))
+                # Drop internal scoring keys
+                for a in articles:
+                    a.pop("distance", None)
+                articles = articles[:max(n_results, 10)]
             
             # Fallback to keyword search if no semantic results
             if not articles:
@@ -225,7 +247,16 @@ class ChatService:
                 
                 # Sort by score and take top results
                 articles.sort(key=lambda x: (x.get('score', 0), x.get('published_date') or ""), reverse=True)
-                articles = articles[:max(n_results, 10)]
+                # Deduplicate by URL in keyword mode
+                seen_urls = set()
+                deduped = []
+                for a in articles:
+                    u = a.get("url")
+                    if not u or u in seen_urls:
+                        continue
+                    seen_urls.add(u)
+                    deduped.append(a)
+                articles = deduped[:max(n_results, 10)]
                 
                 # Remove score before returning
                 for article in articles:
@@ -798,6 +829,9 @@ Items:
         # Build context from articles
         context_text = ""
         sources = []
+
+        # Simple recency signal to help the model call out weak/stale retrieval.
+        published_dates = []
         
         for i, article in enumerate(context_articles, 1):
             context_text += f"\n[Article {i}]\n"
@@ -805,10 +839,13 @@ Items:
             context_text += f"Source: {article['source']}\n"
             if article.get("published_date"):
                 context_text += f"Published: {article['published_date']}\n"
+                published_dates.append(article.get("published_date"))
             if article.get("source_type"):
                 context_text += f"Source Type: {article['source_type']}\n"
-            context_text += f"Content: {article['content'][:1200]}...\n"
-            context_text += f"URL: {article['url']}\n"
+            # Prevent raw URLs from showing up in the model prompt body.
+            content = (article.get("content") or "")
+            content = re.sub(r"https?://\\S+", "[link]", content)
+            context_text += f"Content: {content[:1200]}...\n"
             
             sources.append({
                 'title': article['title'],
@@ -822,9 +859,10 @@ Items:
 Hard rules:
 - Use ONLY the provided articles + conversation context.
 - Do NOT paste raw URLs in the body.
-- Every factual claim tied to an article must carry at least one inline citation like [1].
+- Every factual claim tied to an article must carry at least one inline citation like [1] that refers to the provided Sources list.
 - If retrieval is weak or stale, explicitly say so (e.g., "I’m not seeing strong coverage in the last X days") and suggest what to search.
 - Adapt tone/depth to the requested audience: Exec, Investor, Operator, Engineer/Architect, Sustainability, Vendor.
+- In the final "Sources" section, reproduce the provided Sources list exactly (same numbering, no reordering, no URLs).
 
 Output format exactly:
 ## What changed recently
@@ -864,7 +902,24 @@ Output format exactly:
             convo_lines.append(f"{role.upper()}: {content}")
         convo_context = "\n".join(convo_lines[-12:])
 
+        # Best-effort: compute "days since newest item" (ISO parsing may fail; ok).
+        newest_days = None
+        try:
+            newest_iso = None
+            for p in published_dates:
+                if p and (newest_iso is None or str(p) > str(newest_iso)):
+                    newest_iso = p
+            if newest_iso:
+                newest_dt = datetime.fromisoformat(str(newest_iso).replace("Z", "+00:00"))
+                newest_days = max(0, (datetime.utcnow().replace(tzinfo=newest_dt.tzinfo) - newest_dt).days)
+        except Exception:
+            newest_days = None
+
+        sources_block = "\n".join([f"{i}. {s['title']} — {s['source']}" for i, s in enumerate(sources, 1)])
+
         user_prompt = f"""Audience: {aud}
+
+Recency note: newest provided item is {newest_days if newest_days is not None else "unknown"} days old.
 
 Conversation memory (may be empty):
 {mem if mem else "(none)"}
@@ -877,7 +932,10 @@ Question: {query}
 Available Articles:
 {context_text}
 
-Write a Rundown-style synthesis. Use citations like [1] that map to the Sources list you produce at the end."""
+Sources list to cite (do not reorder, do not add URLs):
+{sources_block}
+
+Write a Rundown-style synthesis. Use citations like [1] that refer to the Sources list above. In your final "Sources" section, reproduce that same list exactly."""
         
         try:
             # Check cost limits before making API call
@@ -977,11 +1035,42 @@ Write a Rundown-style synthesis. Use citations like [1] that map to the Sources 
             recent_messages = self._load_recent_messages(db, conversation_id=conv.id, limit=12)
             memory_summary = (conv.memory_summary or "").strip() or None
             aud = (audience or conv.audience or "Exec").strip()
+            constraints = route.get("constraints") or {}
         finally:
             db.close()
 
         # Retrieve more candidates to support themes, then let the LLM cluster/synthesize.
-        articles = self.retrieve_relevant_articles(query, n_results=40)
+        search_query = query
+        try:
+            extras = []
+            cooling = constraints.get("cooling_type") or []
+            for c in cooling:
+                if c == "direct_to_chip":
+                    extras.extend(["direct-to-chip", "d2c"])
+                elif c == "immersion":
+                    extras.append("immersion")
+                elif c == "rear_door_hx":
+                    extras.extend(["rear-door", "heat exchanger"])
+                elif c == "facility_hvac":
+                    extras.extend(["chiller", "CRAH", "CRAC"])
+            rack_kw = constraints.get("rack_kw") or []
+            for k in rack_kw:
+                try:
+                    extras.append(f"{int(k)}kW")
+                except Exception:
+                    pass
+            power_mw = constraints.get("power_mw") or []
+            for m in power_mw:
+                try:
+                    extras.append(f"{int(m)}MW")
+                except Exception:
+                    pass
+            if extras:
+                search_query = f"{query} {' '.join(sorted(set(extras)))}"
+        except Exception:
+            search_query = query
+
+        articles = self.retrieve_relevant_articles(search_query, n_results=40)
         
         # Proactive fallback: if it's a location question and we didn't retrieve any location hits,
         # try to fetch a few fresh, location-specific items and re-run retrieval once.

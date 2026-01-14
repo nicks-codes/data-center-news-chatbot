@@ -63,8 +63,25 @@
         <!-- Main Chat Area -->
         <main class="chat-container">
             <div class="chat-header">
-                <h2>Data Center News Chatbot</h2>
-                <p>Ask questions about the latest data center industry news and trends</p>
+                <div class="chat-header-top">
+                    <div class="chat-header-title">
+                        <h2>Data Center News Chatbot</h2>
+                        <p>Ask questions about the latest data center industry news and trends</p>
+                    </div>
+                    <div class="chat-header-actions">
+                        <label class="audience-label" for="audience-select">Audience</label>
+                        <select id="audience-select" class="audience-select">
+                            <option value="Exec">Exec</option>
+                            <option value="Investor">Investor</option>
+                            <option value="Architect">Architect</option>
+                            <option value="Operator">Operator</option>
+                            <option value="Engineer">Engineer</option>
+                            <option value="Sustainability">Sustainability</option>
+                            <option value="Vendor">Vendor</option>
+                        </select>
+                        <button id="new-chat-btn" class="new-chat-btn" type="button">New chat</button>
+                    </div>
+                </div>
             </div>
             
             <div class="chat-messages" id="chat-messages">
