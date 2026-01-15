@@ -19,6 +19,12 @@
                     <h1>DC News</h1>
                 </div>
             </div>
+
+            <div class="chat-history">
+                <button id="sidebar-new-chat-btn" class="new-chat-btn sidebar-new-chat" type="button">+ New chat</button>
+                <h3>🗂️ Chats</h3>
+                <div id="conversation-list" class="conversation-list"></div>
+            </div>
             
             <div class="stats-section">
                 <h3>📊 Knowledge Base</h3>
@@ -101,19 +107,30 @@
             </div>
             
             <div class="chat-input-container">
+                <div class="input-helper">
+                    <span class="helper-label">Audience</span>
+                    <span class="helper-pill" id="audience-pill">Exec</span>
+                    <span class="helper-label">Time window</span>
+                    <button type="button" class="helper-chip" data-insert="last 7 days">Last 7 days</button>
+                    <button type="button" class="helper-chip" data-insert="last 30 days">Last 30 days</button>
+                    <span class="helper-note">Shift+Enter for newline</span>
+                </div>
                 <form id="chat-form">
-                    <input 
-                        type="text" 
-                        id="chat-input" 
+                    <textarea 
+                        id="chat-input"
+                        rows="1"
                         placeholder="Ask about data center news..."
                         autocomplete="off"
-                    >
-                    <button type="submit" id="send-btn">
-                        <span>Send</span>
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
-                        </svg>
-                    </button>
+                    ></textarea>
+                    <div class="chat-actions">
+                        <button type="button" id="stop-btn" class="stop-btn" hidden>Stop generating</button>
+                        <button type="submit" id="send-btn">
+                            <span>Send</span>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                            </svg>
+                        </button>
+                    </div>
                 </form>
             </div>
         </main>

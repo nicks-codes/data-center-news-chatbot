@@ -48,6 +48,7 @@ class Conversation(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    title = Column(String(160), nullable=True, index=True)
     audience = Column(String(50), nullable=True, index=True)
     memory_summary = Column(Text, nullable=True)
 
@@ -66,3 +67,15 @@ class Message(Base):
     tokens_est = Column(Integer, nullable=True)
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class Feedback(Base):
+    """User feedback on assistant messages."""
+    __tablename__ = "feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, index=True)
+    rating = Column(String(10), nullable=False)  # up / down
+    tag = Column(String(50), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)

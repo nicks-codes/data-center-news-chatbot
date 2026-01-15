@@ -1,12 +1,12 @@
 """
 FastAPI application for Data Center News Chatbot
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, Any
+from typing import Optional, Any, List
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -16,7 +16,7 @@ from .services.chat_service import ChatService
 from .scheduler import ScrapingScheduler
 from .services.text_chunker import chunk_text
 from .database.db import SessionLocal
-from .database.models import Article
+from .database.models import Article, Conversation, Message, Feedback
 from .scrapers.newsletter_scraper import NewsletterScraper
 import json
 from uuid import uuid4
@@ -132,13 +132,26 @@ class ChatRequest(BaseModel):
     history: list = []
     audience: Optional[str] = None
     conversation_id: Optional[str] = None
+    regenerate: Optional[bool] = False
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list
     conversation_id: Optional[str] = None
+    message_id: Optional[int] = None
     suggested_followups: Optional[list] = None
     meta: Optional[dict] = None
+
+
+class FeedbackRequest(BaseModel):
+    conversation_id: str
+    message_id: Optional[int] = None
+    rating: str  # up | down
+    tag: Optional[str] = None
+
+
+class RenameConversationRequest(BaseModel):
+    title: str
 
 class SummaryResponse(BaseModel):
     article_id: int
@@ -202,11 +215,235 @@ async def chat(request: ChatRequest):
             history=request.history or [],  # backwards-compatible; server-side memory is preferred
             audience=request.audience,
             conversation_id=request.conversation_id,
+            regenerate=bool(request.regenerate),
         )
         return ChatResponse(**result)
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: Request, chat_request: ChatRequest):
+    """Stream chat responses via SSE."""
+    if not chat_request.query or not chat_request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    def _sse_event(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    def _chunk_text(text: str, size: int = 18):
+        for i in range(0, len(text), size):
+            yield text[i:i + size]
+
+    async def event_generator():
+        prep = chat_service._prepare_chat_context(
+            query=chat_request.query.strip(),
+            audience=chat_request.audience,
+            conversation_id=chat_request.conversation_id,
+            regenerate=bool(chat_request.regenerate),
+        )
+        if prep.get("type") == "early":
+            result = prep["result"]
+            answer = result.get("answer") or ""
+            for chunk in _chunk_text(answer):
+                if await request.is_disconnected():
+                    return
+                yield _sse_event("token", {"text": chunk})
+            done_payload = {
+                "sources": result.get("sources") or [],
+                "conversation_id": result.get("conversation_id"),
+                "message_id": result.get("message_id"),
+                "suggested_followups": result.get("suggested_followups") or [],
+                "meta": result.get("meta") or {},
+                "final_text": answer,
+            }
+            yield _sse_event("done", done_payload)
+            return
+
+        system_prompt, user_prompt, sources = chat_service._build_rundown_prompts(
+            query=prep["query"],
+            retrieval_query=prep.get("retrieval_query"),
+            context_articles=prep["selected_articles"],
+            audience=prep["audience"],
+            memory_summary=prep.get("memory_summary"),
+            recent_messages=prep.get("recent_messages"),
+            response_meta=prep.get("response_meta"),
+            theme_hints=prep.get("theme_hints"),
+        )
+
+        tokens: List[str] = []
+        aborted = False
+        try:
+            for token in chat_service._llm_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=850,
+                temperature=0.25,
+            ):
+                if await request.is_disconnected():
+                    aborted = True
+                    break
+                tokens.append(token)
+                yield _sse_event("token", {"text": token})
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield _sse_event("done", {"error": str(e)})
+            return
+
+        if aborted:
+            return
+
+        raw_answer = "".join(tokens).strip()
+        final_answer = chat_service._clean_rundown_answer(
+            raw_answer,
+            audience=prep["audience"],
+            max_sources=len(sources),
+        )
+        final_answer = final_answer or raw_answer
+
+        message_id = None
+        db = SessionLocal()
+        try:
+            conv = chat_service._get_or_create_conversation(
+                db,
+                conversation_id=prep["conversation_id"],
+                audience=prep["audience"],
+            )
+            message_id = chat_service._store_assistant_message(db, conv=conv, content=final_answer)
+        finally:
+            db.close()
+
+        done_payload = {
+            "sources": sources,
+            "conversation_id": prep["conversation_id"],
+            "message_id": message_id,
+            "suggested_followups": [
+                "Compare two approaches in more detail",
+                "Who are the winners / leading vendors?",
+                "What should I watch over the next 30–90 days?",
+            ],
+            "meta": prep.get("response_meta") or {},
+            "final_text": final_answer,
+        }
+        yield _sse_event("done", done_payload)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.post("/api/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    rating = (request.rating or "").strip().lower()
+    if rating not in {"up", "down"}:
+        raise HTTPException(status_code=400, detail="rating must be 'up' or 'down'")
+    tag = (request.tag or "").strip() or None
+
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.id == request.conversation_id).first()
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        message_id = request.message_id
+        if message_id:
+            msg = db.query(Message).filter(Message.id == message_id).first()
+            if not msg or msg.conversation_id != conv.id:
+                raise HTTPException(status_code=400, detail="message_id is invalid for this conversation")
+        fb = Feedback(
+            conversation_id=conv.id,
+            message_id=message_id,
+            rating=rating,
+            tag=tag,
+        )
+        db.add(fb)
+        db.commit()
+        return {"status": "ok"}
+    finally:
+        db.close()
+
+
+@app.get("/api/conversations")
+async def list_conversations():
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Conversation)
+            .order_by(Conversation.updated_at.desc())
+            .limit(50)
+            .all()
+        )
+        return {
+            "conversations": [
+                {
+                    "id": c.id,
+                    "title": (c.title or "New chat"),
+                    "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+                    "audience": c.audience,
+                }
+                for c in rows
+            ]
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        messages = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.id.asc())
+            .all()
+        )
+        return {
+            "id": conv.id,
+            "title": conv.title or "New chat",
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+            "audience": conv.audience,
+            "messages": [
+                {
+                    "id": m.id,
+                    "role": m.role,
+                    "content": m.content,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                }
+                for m in messages
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/conversations/{conversation_id}/rename")
+async def rename_conversation(conversation_id: str, request: RenameConversationRequest):
+    title = (request.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title cannot be empty")
+    if len(title) > 160:
+        title = title[:160].rstrip()
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        conv.title = title
+        conv.updated_at = datetime.utcnow()
+        db.commit()
+        return {
+            "id": conv.id,
+            "title": conv.title,
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+        }
+    finally:
+        db.close()
 
 
 @app.post("/api/newsletter/upload", response_model=NewsletterUploadResponse)

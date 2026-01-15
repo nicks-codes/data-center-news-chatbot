@@ -6,7 +6,7 @@ try:
 except ImportError:  # pragma: no cover
     openai = None
 import os
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Callable
 import logging
 import re
 from datetime import datetime, timedelta
@@ -515,6 +515,422 @@ class ChatService:
             return 0
         return max(1, int(len(text) / 4))
 
+    def _sanitize_title(self, title: str) -> str:
+        t = (title or "").strip().strip('"').strip("'")
+        t = re.sub(r"\s+", " ", t)
+        t = re.sub(r"[^\w\s\-&/]", "", t)
+        if len(t) > 64:
+            t = t[:64].rstrip()
+        return t.strip()
+
+    def _maybe_autotitle_conversation(self, db, *, conv: Conversation) -> None:
+        if not conv or (conv.title or "").strip():
+            return
+        user_count = db.query(Message).filter(
+            Message.conversation_id == conv.id,
+            Message.role == "user",
+        ).count()
+        if user_count < 2:
+            return
+
+        # Use the first two user turns for context
+        seed_msgs = (
+            db.query(Message)
+            .filter(Message.conversation_id == conv.id, Message.role == "user")
+            .order_by(Message.id.asc())
+            .limit(2)
+            .all()
+        )
+        seed_text = " / ".join([(m.content or "").strip() for m in seed_msgs if (m.content or "").strip()])
+        if not seed_text:
+            return
+
+        title = ""
+        if self.enabled and self.client:
+            system_prompt = "You generate short, specific chat titles for data center industry conversations."
+            user_prompt = f"""Create a 3-6 word title based on these snippets.
+Use specific nouns. No quotes. No emojis.
+
+Snippets: {seed_text}
+Title:"""
+            try:
+                title = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=18, temperature=0.2).strip()
+            except Exception:
+                title = ""
+
+        if not title:
+            # Fallback: truncate the first snippet to ~6 words
+            words = re.findall(r"[A-Za-z0-9\-]+", seed_text)
+            title = " ".join(words[:6])
+
+        title = self._sanitize_title(title)
+        if title:
+            conv.title = title
+            conv.updated_at = datetime.utcnow()
+            db.commit()
+
+    def _delete_last_assistant_message(self, db, *, conv: Conversation) -> None:
+        if not conv:
+            return
+        last = (
+            db.query(Message)
+            .filter(Message.conversation_id == conv.id)
+            .order_by(Message.id.desc())
+            .first()
+        )
+        if last and (last.role or "").strip() == "assistant":
+            db.delete(last)
+            conv.updated_at = datetime.utcnow()
+            db.commit()
+
+    def _is_followup_query(self, query: str, recent_messages: List[Message]) -> bool:
+        q = (query or "").strip().lower()
+        if not q:
+            return False
+        if len(q.split()) >= 9 and len(q) > 80:
+            return False
+        followup_markers = [
+            "what about", "who are", "who's", "compare", "those", "them", "that",
+            "it", "they", "these", "same", "earlier", "previous", "above", "dfw",
+        ]
+        if any(k in q for k in followup_markers):
+            return True
+        # If there was a recent assistant response and the query is short, assume follow-up
+        has_assistant = any((m.role or "").strip() == "assistant" for m in recent_messages or [])
+        return has_assistant and len(q.split()) <= 6
+
+    def _rewrite_followup_query(self, query: str, *, memory_summary: Optional[str], last_answer: Optional[str]) -> str:
+        base = (query or "").strip()
+        if not base:
+            return base
+        if not self.enabled or not self.client:
+            context_bits = []
+            if memory_summary:
+                context_bits.append(memory_summary.strip())
+            if last_answer:
+                context_bits.append(last_answer.strip()[:600])
+            context = " ".join(context_bits)
+            if context:
+                return f"Based on our prior discussion, {base}"
+            return base
+
+        system_prompt = "Rewrite follow-up questions into a standalone, specific retrieval query."
+        user_prompt = f"""Conversation memory:
+{(memory_summary or "(none)").strip()}
+
+Last assistant answer:
+{(last_answer or "(none)").strip()}
+
+Follow-up question:
+{base}
+
+Return a single, specific, standalone query. No quotes."""
+        try:
+            rewritten = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=80, temperature=0.2).strip()
+        except Exception:
+            rewritten = ""
+        return rewritten or base
+
+    def _store_assistant_message(self, db, *, conv: Conversation, content: str) -> Optional[int]:
+        if not conv or not content:
+            return None
+        msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content=content,
+            tokens_est=self._estimate_tokens(content),
+        )
+        db.add(msg)
+        conv.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(msg)
+        return msg.id
+
+    def _retrieve_and_select(
+        self,
+        *,
+        query: str,
+        constraints: Dict[str, Any],
+        intent: str,
+        mode: Optional[str],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], str]:
+        # Recency window (default last 14 days for "latest/news/deals/construction" intents; overridable).
+        requested_days = self._parse_time_window_days(query)
+        default_days = 14 if (intent in {"news_update", "deal_monitor"} or mode == "construction_projects") else None
+        time_window_days = requested_days or default_days
+        widened = False
+        coverage_thin = False
+
+        # Retrieve more candidates to support themes, then cluster/synthesize.
+        search_query = query
+        try:
+            extras = []
+            cooling = constraints.get("cooling_type") or []
+            for c in cooling:
+                if c == "direct_to_chip":
+                    extras.extend(["direct-to-chip", "d2c"])
+                elif c == "immersion":
+                    extras.append("immersion")
+                elif c == "rear_door_hx":
+                    extras.extend(["rear-door", "heat exchanger"])
+                elif c == "facility_hvac":
+                    extras.extend(["chiller", "CRAH", "CRAC"])
+            rack_kw = constraints.get("rack_kw") or []
+            for k in rack_kw:
+                try:
+                    extras.append(f"{int(k)}kW")
+                except Exception:
+                    pass
+            power_mw = constraints.get("power_mw") or []
+            for m in power_mw:
+                try:
+                    extras.append(f"{int(m)}MW")
+                except Exception:
+                    pass
+            if extras:
+                search_query = f"{query} {' '.join(sorted(set(extras)))}"
+        except Exception:
+            search_query = query
+
+        # Pull a larger candidate set so recency filtering can still find enough.
+        candidate_pool = self.retrieve_relevant_articles(search_query, n_results=80)
+        articles = candidate_pool
+
+        if time_window_days:
+            articles = self._filter_by_recency_days(candidate_pool, days=int(time_window_days))
+            if len(articles) < 4 and (requested_days is None) and int(time_window_days) < 30:
+                # Auto-widen to 30 days, but surface this via meta/UI (not via uncited bullets).
+                coverage_thin = True
+                widened = True
+                time_window_days = 30
+                articles = self._filter_by_recency_days(candidate_pool, days=30)
+
+        # Proactive fallback: if it's a location question and we didn't retrieve any location hits,
+        # try to fetch a few fresh, location-specific items and re-run retrieval once.
+        query_lower = query.lower()
+        loc_terms = self._location_terms(query_lower)
+        if loc_terms:
+            have_loc = any(
+                any(t in (a.get("title", "").lower() + " " + a.get("content", "").lower()) for t in loc_terms)
+                for a in articles
+            )
+            if not have_loc:
+                inserted = self._proactive_fetch(query)
+                if inserted > 0:
+                    candidate_pool = self.retrieve_relevant_articles(search_query, n_results=80)
+                    articles = candidate_pool
+                    if time_window_days:
+                        articles = self._filter_by_recency_days(candidate_pool, days=int(time_window_days))
+
+        if not articles:
+            response_meta = {
+                "time_window_days": time_window_days or None,
+                "sources_used": 0,
+                "coverage_thin": coverage_thin,
+                "widened_to_days": 30 if widened else None,
+                "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0),
+            }
+            return [], [], response_meta, ""
+
+        # Cluster candidates (real clustering when embeddings are enabled) to build grounded theme hints.
+        theme_hints, clusters = self._build_theme_hints(articles, max_themes=3)
+
+        # Backend-controlled sources list (dedupe + cap) to keep citations stable in the UI.
+        # Prefer selecting from top clusters to make Themes distinct and grounded.
+        # Hard cap at 10 so citations always map to UI sources.
+        max_sources = 10
+        deduped = []
+        seen = set()
+        for a in articles:
+            u = (a.get("url") or "").strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            deduped.append(a)
+            if len(deduped) >= 50:
+                break
+
+        selected: List[Dict[str, Any]] = []
+        if clusters:
+            per_cluster = max(2, int((max_sources + 2) / 3))
+            selected_urls = set()
+            for c in clusters[:3]:
+                count = 0
+                for idx in c.get("indices", []):
+                    if idx < 0 or idx >= len(deduped):
+                        continue
+                    u = (deduped[idx].get("url") or "").strip()
+                    if not u or u in selected_urls:
+                        continue
+                    selected.append(deduped[idx])
+                    selected_urls.add(u)
+                    count += 1
+                    if count >= per_cluster:
+                        break
+            for a in deduped:
+                if len(selected) >= max_sources:
+                    break
+                u = (a.get("url") or "").strip()
+                if not u or u in selected_urls:
+                    continue
+                selected.append(a)
+                selected_urls.add(u)
+        else:
+            selected = deduped
+
+        selected_articles, sources = self._dedupe_and_cap_sources(selected, max_sources=max_sources)
+
+        response_meta = {
+            "time_window_days": time_window_days or None,
+            "sources_used": len(sources),
+            "coverage_thin": coverage_thin,
+            "widened_to_days": 30 if widened else None,
+            "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0),
+        }
+
+        return selected_articles, sources, response_meta, theme_hints
+
+    def _prepare_chat_context(
+        self,
+        *,
+        query: str,
+        audience: Optional[str],
+        conversation_id: Optional[str],
+        regenerate: bool,
+    ) -> Dict[str, Any]:
+        """Prepare context for chat/stream. Returns early response or ready context."""
+        db = SessionLocal()
+        try:
+            conv = self._get_or_create_conversation(db, conversation_id=conversation_id, audience=audience)
+            cid = conv.id
+
+            if regenerate:
+                self._delete_last_assistant_message(db, conv=conv)
+            else:
+                db.add(Message(
+                    conversation_id=conv.id,
+                    role="user",
+                    content=query,
+                    tokens_est=self._estimate_tokens(query),
+                ))
+                conv.updated_at = datetime.utcnow()
+                db.commit()
+                self._maybe_autotitle_conversation(db, conv=conv)
+
+            self._maybe_summarize_and_prune(db, conv=conv)
+
+            total_articles = db.query(Article).count()
+            if total_articles == 0:
+                msg = "I don't have any articles in my database yet. The scraper runs every 30 minutes to collect news. Please wait a bit and try again, or ask me a general question about data centers and I'll do my best to help!"
+                message_id = self._store_assistant_message(db, conv=conv, content=msg)
+                return {
+                    "type": "early",
+                    "result": {
+                        "answer": msg,
+                        "sources": [],
+                        "conversation_id": conv.id,
+                        "message_id": message_id,
+                        "suggested_followups": ["Trigger a scrape", "Ask for a weekly digest", "Ask about a specific market (e.g., DFW, N. Virginia)"],
+                        "meta": {"time_window_days": None, "sources_used": 0, "coverage_thin": False, "widened_to_days": None, "semantic_enabled": False},
+                    },
+                }
+        finally:
+            db.close()
+
+        # Router step (lightweight) to decide if we need a single clarifier.
+        db = SessionLocal()
+        try:
+            conv = db.query(Conversation).filter(Conversation.id == cid).first()
+            if not conv:
+                conv = self._get_or_create_conversation(db, conversation_id=cid, audience=audience)
+            route = self._router(query)
+            if route.get("clarifying_question"):
+                clarifier = str(route["clarifying_question"]).strip()
+                message_id = self._store_assistant_message(db, conv=conv, content=clarifier)
+                return {
+                    "type": "early",
+                    "result": {
+                        "answer": clarifier,
+                        "sources": [],
+                        "conversation_id": conv.id,
+                        "message_id": message_id,
+                        "suggested_followups": [],
+                        "meta": {
+                            "clarifying_question": True,
+                            "quick_replies": route.get("clarifying_replies") or [],
+                            "time_window_days": None,
+                            "sources_used": 0,
+                            "coverage_thin": False,
+                            "widened_to_days": None,
+                            "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0),
+                        },
+                    },
+                }
+
+            recent_messages = self._load_recent_messages(db, conversation_id=conv.id, limit=12)
+            memory_summary = (conv.memory_summary or "").strip() or None
+            aud = (audience or conv.audience or "Exec").strip()
+            constraints = route.get("constraints") or {}
+            intent = route.get("intent") or "news_update"
+            mode = route.get("mode")
+        finally:
+            db.close()
+
+        followup_rewrite = None
+        retrieval_query = query
+        if self._is_followup_query(query, recent_messages):
+            last_answer = None
+            for m in reversed(recent_messages or []):
+                if (m.role or "").strip() == "assistant":
+                    last_answer = m.content or ""
+                    break
+            rewritten = self._rewrite_followup_query(query, memory_summary=memory_summary, last_answer=last_answer)
+            if rewritten and rewritten.strip() != query.strip():
+                retrieval_query = rewritten.strip()
+                followup_rewrite = retrieval_query
+
+        selected_articles, sources, response_meta, theme_hints = self._retrieve_and_select(
+            query=retrieval_query,
+            constraints=constraints,
+            intent=intent,
+            mode=mode,
+        )
+        if followup_rewrite:
+            response_meta["followup_rewrite"] = followup_rewrite
+
+        if not selected_articles:
+            db = SessionLocal()
+            try:
+                conv = self._get_or_create_conversation(db, conversation_id=cid, audience=audience)
+                msg = "I couldn't find any strong coverage for that query. Try specifying a time window (last 7–30 days), region/market, and any constraints (MW, rack kW, cooling type)."
+                message_id = self._store_assistant_message(db, conv=conv, content=msg)
+            finally:
+                db.close()
+            return {
+                "type": "early",
+                "result": {
+                    "answer": msg,
+                    "sources": [],
+                    "conversation_id": cid,
+                    "message_id": message_id,
+                    "suggested_followups": ["Last 7 days", "Focus on a specific market", "Compare two cooling options for a rack density"],
+                    "meta": response_meta,
+                },
+            }
+
+        return {
+            "type": "ready",
+            "conversation_id": cid,
+            "audience": aud,
+            "query": query,
+            "retrieval_query": retrieval_query,
+            "memory_summary": memory_summary,
+            "recent_messages": recent_messages,
+            "selected_articles": selected_articles,
+            "response_meta": response_meta,
+            "theme_hints": theme_hints,
+        }
+
     def _get_or_create_conversation(self, db, *, conversation_id: Optional[str], audience: Optional[str]) -> Conversation:
         cid = (conversation_id or "").strip() or str(uuid4())
         conv = db.query(Conversation).filter(Conversation.id == cid).first()
@@ -703,18 +1119,35 @@ Write the updated memory summary as 6-14 bullet points."""
         high_ambiguity = (len(ql.split()) <= 3) or any(t == ql for t in ambiguous_topics)
 
         clarifying_question = None
+        clarifying_replies: List[str] = []
         if high_ambiguity and intent in {"news_update", "explain_concept"}:
             if "cooling" in ql:
                 clarifying_question = "Quick clarifier: are you asking about facility cooling (chillers/CRAH/heat rejection) or chip-level cooling (direct-to-chip/immersion), and what rack density range (e.g., 20–40kW vs 60–100kW+)?"
+                clarifying_replies = [
+                    "Facility cooling (CRAH/chillers), 20–40kW racks",
+                    "Chip-level cooling (D2C/immersion), 60kW+ racks",
+                    "Both, focus on the last 30 days",
+                ]
             elif "power" in ql or "grid" in ql:
                 clarifying_question = "Quick clarifier: which region/market (e.g., N. Virginia, DFW, Phoenix) and are you focused on near-term interconnect delays or longer-term capacity buildout?"
+                clarifying_replies = [
+                    "N. Virginia — interconnect delays",
+                    "DFW — capacity buildout",
+                    "Phoenix — utility constraints",
+                ]
             else:
                 clarifying_question = "Quick clarifier: what specific segment (hyperscalers vs colos vs enterprise) and what time window (last 7 days vs last 30 days) should I focus on?"
+                clarifying_replies = [
+                    "Hyperscalers, last 7 days",
+                    "Colos, last 30 days",
+                    "Enterprise, last 30 days",
+                ]
 
         return {
             "intent": intent,
             "constraints": constraints,
             "clarifying_question": clarifying_question,
+            "clarifying_replies": clarifying_replies,
             "mode": mode,
         }
 
@@ -757,6 +1190,41 @@ Write the updated memory summary as 6-14 bullet points."""
 
         # Remove out-of-range citations early (then bullets may be dropped for having no citations)
         lines = self._strip_out_of_range_citations("\n".join(lines), max_cite=max_sources).splitlines()
+
+        # Capture 1-2 line conversational intro before headers
+        intro_lines: List[str] = []
+        rest: List[str] = []
+        in_intro = True
+        for ln in lines:
+            t = (ln or "").strip()
+            if in_intro:
+                if not t:
+                    continue
+                if t.startswith("## ") or t.startswith("###") or t.startswith("- "):
+                    in_intro = False
+                    rest.append(ln)
+                    continue
+                if len(intro_lines) < 2:
+                    intro_lines.append(t)
+                    continue
+                in_intro = False
+                rest.append(ln)
+                continue
+            rest.append(ln)
+        lines = rest
+
+        # Capture a trailing follow-up question line
+        followup_line = ""
+        for i in range(len(lines) - 1, -1, -1):
+            t = (lines[i] or "").strip()
+            if not t:
+                continue
+            if t.startswith("## ") or t.startswith("###") or t.startswith("- "):
+                break
+            if t.lower().startswith(("follow-up:", "followup:", "question:")) or t.endswith("?"):
+                followup_line = t
+                lines = lines[:i]
+            break
 
         aud = (audience or "Exec").strip()
         allowed_headers = {
@@ -864,7 +1332,18 @@ Write the updated memory summary as 6-14 bullet points."""
             # Drop other prose lines to keep it scannable
             continue
 
-        cleaned = "\n".join(out).strip()
+        assembled: List[str] = []
+        if intro_lines:
+            assembled.extend(intro_lines[:2])
+        if out:
+            if assembled:
+                assembled.append("")
+            assembled.extend(out)
+        if followup_line:
+            if assembled:
+                assembled.append("")
+            assembled.append(followup_line)
+        cleaned = "\n".join(assembled).strip()
         cleaned = self._strip_out_of_range_citations(cleaned, max_cite=max_sources)
         return cleaned
 
@@ -893,6 +1372,186 @@ Write the updated memory summary as 6-14 bullet points."""
             max_tokens=max_tokens,
         )
         return resp.choices[0].message.content or ""
+
+    def _llm_stream(self, *, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float):
+        if not self.enabled or not self.client:
+            raise RuntimeError("AI service is not available (missing API key or SDK).")
+        if self.cost_tracker:
+            self.cost_tracker.record_chat(user_prompt)
+        resp = self.client.chat.completions.create(
+            model=self._select_chat_model(),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        for chunk in resp:
+            delta = None
+            try:
+                delta = chunk.choices[0].delta
+            except Exception:
+                delta = None
+            text = ""
+            if delta is not None:
+                text = getattr(delta, "content", "") or ""
+            if text:
+                yield text
+
+    def _build_rundown_prompts(
+        self,
+        *,
+        query: str,
+        retrieval_query: Optional[str],
+        context_articles: List[Dict],
+        audience: Optional[str],
+        memory_summary: Optional[str],
+        recent_messages: Optional[List[Message]],
+        response_meta: Optional[Dict[str, Any]],
+        theme_hints: Optional[str],
+    ) -> Tuple[str, str, List[Dict[str, Any]]]:
+        """Build system/user prompts and sources list for the rundown answer."""
+        # Build context from articles (sources are backend-controlled/capped upstream)
+        context_text = ""
+        sources: List[Dict[str, Any]] = []
+
+        # Simple recency signal to help the model call out weak/stale retrieval.
+        published_dates = []
+
+        for i, article in enumerate(context_articles, 1):
+            context_text += f"\n[Source {i}]\n"
+            context_text += f"Title: {article['title']}\n"
+            context_text += f"Publisher: {article['source']}\n"
+            if article.get("published_date"):
+                context_text += f"Published: {article['published_date']}\n"
+                published_dates.append(article.get("published_date"))
+            if article.get("source_type"):
+                context_text += f"Source Type: {article['source_type']}\n"
+            # Prevent raw URLs from showing up in the model prompt body.
+            content = (article.get("content") or "")
+            content = re.sub(r"https?://\\S+", "[link]", content)
+            context_text += f"Content: {content[:1200]}...\n"
+
+            sources.append({
+                'title': article['title'],
+                'url': article['url'],
+                'source': article['source'],
+            })
+
+        system_prompt = """You are a smart operator/analyst for data center infrastructure. Be conversational and direct.
+
+Hard rules:
+- Use ONLY the provided articles + conversation context.
+- Do NOT paste raw URLs in the body.
+- Every factual claim tied to an article must carry at least one inline citation like [1] that refers to the provided Sources list.
+- If retrieval is weak or stale, explicitly say so (e.g., "I’m not seeing strong coverage in the last X days") and suggest what to search.
+- Adapt tone/depth to the requested audience: Exec, Investor, Operator, Engineer/Architect, Sustainability, Vendor.
+- Use ONLY dash bullets: every bullet line MUST start with "- " (dash + space). Do not use "*" bullets.
+- Do NOT include a "Sources" section in the answer (sources are shown separately in the UI). Only cite inline like [1].
+- No filler: any bullet in "What changed recently", "Themes", or "Why it matters" MUST include at least one citation like [1].
+- Themes must be grounded: use the provided "Theme candidates" (clustered from retrieved items) to name themes and avoid repetition.
+- When possible, each theme should cite 2+ different sources across its bullets (not the same [1] repeatedly).
+- "Why it matters" bullets must explicitly connect a cited item to an implication (e.g., "Because [3] indicates X, expect Y…").
+
+Length limits (strict):
+- "What changed recently": max 5 bullets.
+- "Themes": max 3 themes, max 3 bullets per theme.
+- "Why it matters": max 3 bullets.
+- "If I were you": max 3 bullets.
+
+Output format exactly:
+<1–2 sentence conversational framing>
+## What changed recently
+<bullets only>
+
+## Themes
+### <Theme 1>
+<bullets only>
+### <Theme 2>
+<bullets only>
+### <Theme 3>
+<bullets only>
+
+## Why it matters (for <audience>)
+<bullets only>
+
+## If I were you
+<bullets only>
+
+End with a single follow-up question when it would materially improve the next answer. Put it on its own line starting with "Follow-up:"."""
+
+        # Conversation context for continuity
+        aud = (audience or "Exec").strip()
+        mem = (memory_summary or "").strip()
+        convo_lines = []
+        for m in (recent_messages or []):
+            role = (m.role or "").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            content = (m.content or "").strip()
+            if not content:
+                continue
+            convo_lines.append(f"{role.upper()}: {content}")
+        convo_context = "\n".join(convo_lines[-12:])
+
+        # Best-effort: compute "days since newest item" (ISO parsing may fail; ok).
+        newest_days = None
+        try:
+            newest_iso = None
+            for p in published_dates:
+                if p and (newest_iso is None or str(p) > str(newest_iso)):
+                    newest_iso = p
+            if newest_iso:
+                newest_dt = datetime.fromisoformat(str(newest_iso).replace("Z", "+00:00"))
+                newest_days = max(0, (datetime.utcnow().replace(tzinfo=newest_dt.tzinfo) - newest_dt).days)
+        except Exception:
+            newest_days = None
+
+        sources_block = "\n".join([f"{i}. {s['title']} — {s['source']}" for i, s in enumerate(sources, 1)])
+
+        # Lightweight mode hinting (construction projects)
+        query_lower = (query or "").lower()
+        construction_mode = any(k in query_lower for k in ["construction projects", "latest construction projects", "data center construction", "breaking ground", "new builds"])
+
+        followup_line = ""
+        if retrieval_query and retrieval_query.strip() and retrieval_query.strip() != (query or "").strip():
+            followup_line = f"Follow-up rewrite (for retrieval context): {retrieval_query.strip()}"
+
+        user_prompt = f"""Audience: {aud}
+Mode: {"construction_projects" if construction_mode else "default"}
+
+Recency note: newest provided item is {newest_days if newest_days is not None else "unknown"} days old.
+Time window: last {((response_meta or {}).get("time_window_days")) if response_meta else "unknown"} days.
+
+Conversation memory (may be empty):
+{mem if mem else "(none)"}
+
+Recent conversation turns:
+{convo_context if convo_context else "(none)"}
+
+Question: {query}
+{followup_line}
+
+Available Articles (numbered for citations):
+{context_text}
+
+Sources list to cite (exact; citations must refer to these numbers):
+{sources_block}
+
+{(theme_hints or "").strip()}
+
+Task:
+- Write the Rundown-style sections exactly as specified.
+- Use inline citations like [1] that refer to the sources list above.
+- Do NOT include a Sources section in the answer body.
+
+Construction projects mode instructions (only if Mode=construction_projects):
+- In "What changed recently", every bullet should be a concrete project item (company/project name — location — size/capex/MW if stated) with a citation.
+- If size/capex/MW isn't in sources, omit it (do not invent).
+"""
+        return system_prompt, user_prompt, sources
 
     def summarize_article(self, article_id: int, force: bool = False) -> Dict:
         """
@@ -1211,6 +1870,7 @@ Items:
         query: str,
         context_articles: List[Dict],
         *,
+        retrieval_query: Optional[str] = None,
         audience: Optional[str] = None,
         memory_summary: Optional[str] = None,
         recent_messages: Optional[List[Message]] = None,
@@ -1223,139 +1883,16 @@ Items:
                 'answer': "Sorry, the AI service is not available. Please configure your OpenAI API key.",
                 'sources': []
             }
-        
-        # Build context from articles (sources are backend-controlled/capped upstream)
-        context_text = ""
-        sources = []
-
-        # Simple recency signal to help the model call out weak/stale retrieval.
-        published_dates = []
-        
-        for i, article in enumerate(context_articles, 1):
-            context_text += f"\n[Source {i}]\n"
-            context_text += f"Title: {article['title']}\n"
-            context_text += f"Publisher: {article['source']}\n"
-            if article.get("published_date"):
-                context_text += f"Published: {article['published_date']}\n"
-                published_dates.append(article.get("published_date"))
-            if article.get("source_type"):
-                context_text += f"Source Type: {article['source_type']}\n"
-            # Prevent raw URLs from showing up in the model prompt body.
-            content = (article.get("content") or "")
-            content = re.sub(r"https?://\\S+", "[link]", content)
-            context_text += f"Content: {content[:1200]}...\n"
-            
-            sources.append({
-                'title': article['title'],
-                'url': article['url'],
-                'source': article['source'],
-            })
-        
-        # Rundown-style by default. Force citations for any source-backed factual claim.
-        system_prompt = """You are Data Center Rundown-style analyst: concise, high-signal, synthesis-first.
-
-Hard rules:
-- Use ONLY the provided articles + conversation context.
-- Do NOT paste raw URLs in the body.
-- Every factual claim tied to an article must carry at least one inline citation like [1] that refers to the provided Sources list.
-- If retrieval is weak or stale, explicitly say so (e.g., "I’m not seeing strong coverage in the last X days") and suggest what to search.
-- Adapt tone/depth to the requested audience: Exec, Investor, Operator, Engineer/Architect, Sustainability, Vendor.
-- Use ONLY dash bullets: every bullet line MUST start with "- " (dash + space). Do not use "*" bullets.
-- Do NOT include a "Sources" section in the answer (sources are shown separately in the UI). Only cite inline like [1].
-- No filler: any bullet in "What changed recently", "Themes", or "Why it matters" MUST include at least one citation like [1].
-- Themes must be grounded: use the provided "Theme candidates" (clustered from retrieved items) to name themes and avoid repetition.
-- When possible, each theme should cite 2+ different sources across its bullets (not the same [1] repeatedly).
-- "Why it matters" bullets must explicitly connect a cited item to an implication (e.g., "Because [3] indicates X, expect Y…").
-
-Length limits (strict):
-- "What changed recently": max 5 bullets.
-- "Themes": max 3 themes, max 3 bullets per theme.
-- "Why it matters": max 3 bullets.
-- "If I were you": max 3 bullets.
-
-Output format exactly:
-## What changed recently
-<bullets only>
-
-## Themes
-### <Theme 1>
-<bullets only>
-### <Theme 2>
-<bullets only>
-### <Theme 3>
-<bullets only>
-
-## Why it matters (for <audience>)
-<bullets only>
-
-## If I were you
-<bullets only>
-"""
-        
-        # Conversation context for continuity
-        aud = (audience or "Exec").strip()
-        mem = (memory_summary or "").strip()
-        convo_lines = []
-        for m in (recent_messages or []):
-            role = (m.role or "").strip()
-            if role not in {"user", "assistant"}:
-                continue
-            content = (m.content or "").strip()
-            if not content:
-                continue
-            convo_lines.append(f"{role.upper()}: {content}")
-        convo_context = "\n".join(convo_lines[-12:])
-
-        # Best-effort: compute "days since newest item" (ISO parsing may fail; ok).
-        newest_days = None
-        try:
-            newest_iso = None
-            for p in published_dates:
-                if p and (newest_iso is None or str(p) > str(newest_iso)):
-                    newest_iso = p
-            if newest_iso:
-                newest_dt = datetime.fromisoformat(str(newest_iso).replace("Z", "+00:00"))
-                newest_days = max(0, (datetime.utcnow().replace(tzinfo=newest_dt.tzinfo) - newest_dt).days)
-        except Exception:
-            newest_days = None
-
-        sources_block = "\n".join([f"{i}. {s['title']} — {s['source']}" for i, s in enumerate(sources, 1)])
-
-        # Lightweight mode hinting (construction projects)
-        query_lower = (query or "").lower()
-        construction_mode = any(k in query_lower for k in ["construction projects", "latest construction projects", "data center construction", "breaking ground", "new builds"])
-
-        user_prompt = f"""Audience: {aud}
-Mode: {"construction_projects" if construction_mode else "default"}
-
-Recency note: newest provided item is {newest_days if newest_days is not None else "unknown"} days old.
-Time window: last {((response_meta or {}).get("time_window_days")) if response_meta else "unknown"} days.
-
-Conversation memory (may be empty):
-{mem if mem else "(none)"}
-
-Recent conversation turns:
-{convo_context if convo_context else "(none)"}
-
-Question: {query}
-
-Available Articles (numbered for citations):
-{context_text}
-
-Sources list to cite (exact; citations must refer to these numbers):
-{sources_block}
-
-{(theme_hints or "").strip()}
-
-Task:
-- Write the Rundown-style sections exactly as specified.
-- Use inline citations like [1] that refer to the sources list above.
-- Do NOT include a Sources section in the answer body.
-
-Construction projects mode instructions (only if Mode=construction_projects):
-- In "What changed recently", every bullet should be a concrete project item (company/project name — location — size/capex/MW if stated) with a citation.
-- If size/capex/MW isn't in sources, omit it (do not invent).
-"""
+        system_prompt, user_prompt, sources = self._build_rundown_prompts(
+            query=query,
+            retrieval_query=retrieval_query,
+            context_articles=context_articles,
+            audience=audience,
+            memory_summary=memory_summary,
+            recent_messages=recent_messages,
+            response_meta=response_meta,
+            theme_hints=theme_hints,
+        )
         
         try:
             # Check cost limits before making API call
@@ -1371,7 +1908,7 @@ Construction projects mode instructions (only if Mode=construction_projects):
                     }
 
             answer = self._llm(system_prompt=system_prompt, user_prompt=user_prompt, max_tokens=850, temperature=0.25)
-            answer = self._clean_rundown_answer(answer, audience=aud, max_sources=len(sources))
+            answer = self._clean_rundown_answer(answer, audience=(audience or "Exec"), max_sources=len(sources))
             
             return {
                 'answer': answer,
@@ -1399,231 +1936,32 @@ Construction projects mode instructions (only if Mode=construction_projects):
         history: Optional[List[Dict]] = None,
         audience: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        regenerate: bool = False,
     ) -> Dict:
         """Main chat method: server-side memory + retrieval + Rundown-style synthesis."""
-        # If no articles in database, provide helpful message
-        db = SessionLocal()
-        try:
-            conv = self._get_or_create_conversation(db, conversation_id=conversation_id, audience=audience)
-            cid = conv.id
+        prep = self._prepare_chat_context(
+            query=query,
+            audience=audience,
+            conversation_id=conversation_id,
+            regenerate=regenerate,
+        )
+        if prep.get("type") == "early":
+            return prep["result"]
 
-            # Persist the new user message
-            db.add(Message(
-                conversation_id=conv.id,
-                role="user",
-                content=query,
-                tokens_est=self._estimate_tokens(query),
-            ))
-            conv.updated_at = datetime.utcnow()
-            db.commit()
-
-            # Summarize/prune if needed
-            self._maybe_summarize_and_prune(db, conv=conv)
-
-            total_articles = db.query(Article).count()
-            if total_articles == 0:
-                return {
-                    'answer': "I don't have any articles in my database yet. The scraper runs every 30 minutes to collect news. Please wait a bit and try again, or ask me a general question about data centers and I'll do my best to help!",
-                    'sources': [],
-                    'conversation_id': conv.id,
-                    'suggested_followups': ["Trigger a scrape", "Ask for a weekly digest", "Ask about a specific market (e.g., DFW, N. Virginia)"],
-                    'meta': {"time_window_days": None, "sources_used": 0, "coverage_thin": False, "widened_to_days": None, "semantic_enabled": False},
-                }
-        finally:
-            db.close()
-        
-        # Router step (lightweight) to decide if we need a single clarifier.
-        db = SessionLocal()
-        try:
-            conv = db.query(Conversation).filter(Conversation.id == cid).first()
-            if not conv:
-                conv = self._get_or_create_conversation(db, conversation_id=cid, audience=audience)
-            route = self._router(query)
-            if route.get("clarifying_question"):
-                clarifier = str(route["clarifying_question"]).strip()
-                db.add(Message(
-                    conversation_id=conv.id,
-                    role="assistant",
-                    content=clarifier,
-                    tokens_est=self._estimate_tokens(clarifier),
-                ))
-                conv.updated_at = datetime.utcnow()
-                db.commit()
-                return {
-                    "answer": clarifier,
-                    "sources": [],
-                    "conversation_id": conv.id,
-                    "suggested_followups": [],
-                    "meta": {"time_window_days": None, "sources_used": 0, "coverage_thin": False, "widened_to_days": None, "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0)},
-                }
-
-            # Load memory + last N turns for continuity
-            recent_messages = self._load_recent_messages(db, conversation_id=conv.id, limit=12)
-            memory_summary = (conv.memory_summary or "").strip() or None
-            aud = (audience or conv.audience or "Exec").strip()
-            constraints = route.get("constraints") or {}
-            intent = route.get("intent") or "news_update"
-            mode = route.get("mode")
-        finally:
-            db.close()
-
-        # Recency window (default last 14 days for "latest/news/deals/construction" intents; overridable).
-        requested_days = self._parse_time_window_days(query)
-        default_days = 14 if (intent in {"news_update", "deal_monitor"} or mode == "construction_projects") else None
-        time_window_days = requested_days or default_days
-        widened = False
-        coverage_thin = False
-
-        # Retrieve more candidates to support themes, then cluster/synthesize.
-        search_query = query
-        try:
-            extras = []
-            cooling = constraints.get("cooling_type") or []
-            for c in cooling:
-                if c == "direct_to_chip":
-                    extras.extend(["direct-to-chip", "d2c"])
-                elif c == "immersion":
-                    extras.append("immersion")
-                elif c == "rear_door_hx":
-                    extras.extend(["rear-door", "heat exchanger"])
-                elif c == "facility_hvac":
-                    extras.extend(["chiller", "CRAH", "CRAC"])
-            rack_kw = constraints.get("rack_kw") or []
-            for k in rack_kw:
-                try:
-                    extras.append(f"{int(k)}kW")
-                except Exception:
-                    pass
-            power_mw = constraints.get("power_mw") or []
-            for m in power_mw:
-                try:
-                    extras.append(f"{int(m)}MW")
-                except Exception:
-                    pass
-            if extras:
-                search_query = f"{query} {' '.join(sorted(set(extras)))}"
-        except Exception:
-            search_query = query
-
-        # Pull a larger candidate set so recency filtering can still find enough.
-        candidate_pool = self.retrieve_relevant_articles(search_query, n_results=80)
-        articles = candidate_pool
-
-        if time_window_days:
-            articles = self._filter_by_recency_days(candidate_pool, days=int(time_window_days))
-            if len(articles) < 4 and (requested_days is None) and int(time_window_days) < 30:
-                # Auto-widen to 30 days, but surface this via meta/UI (not via uncited bullets).
-                coverage_thin = True
-                widened = True
-                time_window_days = 30
-                articles = self._filter_by_recency_days(candidate_pool, days=30)
-        
-        # Proactive fallback: if it's a location question and we didn't retrieve any location hits,
-        # try to fetch a few fresh, location-specific items and re-run retrieval once.
-        query_lower = query.lower()
-        loc_terms = self._location_terms(query_lower)
-        if loc_terms:
-            have_loc = any(
-                any(t in (a.get("title","").lower() + " " + a.get("content","").lower()) for t in loc_terms)
-                for a in articles
-            )
-            if not have_loc:
-                inserted = self._proactive_fetch(query)
-                if inserted > 0:
-                    candidate_pool = self.retrieve_relevant_articles(search_query, n_results=80)
-                    articles = candidate_pool
-                    if time_window_days:
-                        articles = self._filter_by_recency_days(candidate_pool, days=int(time_window_days))
-        
-        if not articles:
-            # Persist assistant reply
-            db = SessionLocal()
-            try:
-                conv = self._get_or_create_conversation(db, conversation_id=cid, audience=audience)
-                msg = "I couldn't find any strong coverage for that query. Try specifying a time window (last 7–30 days), region/market, and any constraints (MW, rack kW, cooling type)."
-                db.add(Message(conversation_id=conv.id, role="assistant", content=msg, tokens_est=self._estimate_tokens(msg)))
-                conv.updated_at = datetime.utcnow()
-                db.commit()
-            finally:
-                db.close()
-            return {
-                'answer': "I couldn't find any strong coverage for that query. Try specifying a time window (last 7–30 days), region/market, and any constraints (MW, rack kW, cooling type).",
-                'sources': [],
-                'conversation_id': cid,
-                'suggested_followups': ["Last 7 days", "Focus on a specific market", "Compare two cooling options for a rack density"],
-                'meta': {
-                    "time_window_days": time_window_days or None,
-                    "sources_used": 0,
-                    "coverage_thin": coverage_thin,
-                    "widened_to_days": 30 if widened else None,
-                    "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0),
-                },
-            }
-        
-        # Cluster candidates (real clustering when embeddings are enabled) to build grounded theme hints.
-        theme_hints, clusters = self._build_theme_hints(articles, max_themes=3)
-
-        # Backend-controlled sources list (dedupe + cap) to keep citations stable in the UI.
-        # Prefer selecting from top clusters to make Themes distinct and grounded.
-        # Hard cap at 10 so citations always map to UI sources.
-        max_sources = 10
-        # Deduped list for selection
-        deduped = []
-        seen = set()
-        for a in articles:
-            u = (a.get("url") or "").strip()
-            if not u or u in seen:
-                continue
-            seen.add(u)
-            deduped.append(a)
-            if len(deduped) >= 50:
-                break
-
-        selected: List[Dict[str, Any]] = []
-        if clusters:
-            # Map cluster indices over deduped list (as built in _build_theme_hints)
-            # Select up to ~even spread across top clusters
-            per_cluster = max(2, int((max_sources + 2) / 3))
-            selected_urls = set()
-            for c in clusters[:3]:
-                count = 0
-                for idx in c.get("indices", []):
-                    if idx < 0 or idx >= len(deduped):
-                        continue
-                    u = (deduped[idx].get("url") or "").strip()
-                    if not u or u in selected_urls:
-                        continue
-                    selected.append(deduped[idx])
-                    selected_urls.add(u)
-                    count += 1
-                    if count >= per_cluster:
-                        break
-            # Fill remainder
-            for a in deduped:
-                if len(selected) >= max_sources:
-                    break
-                u = (a.get("url") or "").strip()
-                if not u or u in selected_urls:
-                    continue
-                selected.append(a)
-                selected_urls.add(u)
-        else:
-            selected = deduped
-
-        selected_articles, sources = self._dedupe_and_cap_sources(selected, max_sources=max_sources)
-
-        response_meta = {
-            "time_window_days": time_window_days or None,
-            "sources_used": len(sources),
-            "coverage_thin": coverage_thin,
-            "widened_to_days": 30 if widened else None,
-            "semantic_enabled": bool(getattr(self.embedding_service, "enabled", False) and self.vector_store.get_collection_size() > 0),
-        }
+        cid = prep["conversation_id"]
+        aud = prep["audience"]
+        retrieval_query = prep["retrieval_query"]
+        memory_summary = prep["memory_summary"]
+        recent_messages = prep["recent_messages"]
+        selected_articles = prep["selected_articles"]
+        response_meta = prep["response_meta"]
+        theme_hints = prep["theme_hints"]
 
         # Generate response (only from selected sources)
         result = self.generate_response(
             query,
             selected_articles,
+            retrieval_query=retrieval_query,
             audience=aud,
             memory_summary=memory_summary,
             recent_messages=recent_messages,
@@ -1637,14 +1975,8 @@ Construction projects mode instructions (only if Mode=construction_projects):
             conv = self._get_or_create_conversation(db, conversation_id=cid, audience=aud)
             ans = (result.get("answer") or "").strip()
             if ans:
-                db.add(Message(
-                    conversation_id=conv.id,
-                    role="assistant",
-                    content=ans,
-                    tokens_est=self._estimate_tokens(ans),
-                ))
-                conv.updated_at = datetime.utcnow()
-                db.commit()
+                message_id = self._store_assistant_message(db, conv=conv, content=ans)
+                result["message_id"] = message_id
             result["conversation_id"] = conv.id
             # Basic follow-up suggestions (cheap heuristic)
             result["suggested_followups"] = [

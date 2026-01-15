@@ -92,6 +92,12 @@ def init_db():
                 add_col("summary", "summary TEXT")
                 add_col("summary_model", "summary_model VARCHAR(100)")
                 add_col("summary_created_at", "summary_created_at DATETIME")
+
+                conv_cols = conn.execute(text("PRAGMA table_info(conversations)")).fetchall()
+                conv_existing = {row[1] for row in conv_cols}
+
+                if "title" not in conv_existing:
+                    conn.execute(text("ALTER TABLE conversations ADD COLUMN title VARCHAR(160)"))
         except Exception:
             # If this fails, the app can still run; summaries will just be unavailable.
             pass
