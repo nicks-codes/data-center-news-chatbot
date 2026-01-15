@@ -40,8 +40,11 @@ else:
     load_dotenv()
 
 # Configure logging
+log_level = (os.getenv("LOG_LEVEL") or "INFO").upper()
+if log_level not in logging._nameToLevel:
+    log_level = "INFO"
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
