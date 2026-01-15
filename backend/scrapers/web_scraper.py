@@ -23,20 +23,6 @@ except Exception:  # pragma: no cover
 WEB_SOURCES = [
     # Primary Data Center News Sites
     {
-        'name': 'Uptime Institute Blog',
-        'base_url': 'https://uptimeinstitute.com',
-        'article_links': ['https://uptimeinstitute.com/resources/blog'],
-        'article_selector': 'a[href*="/blog/"]',
-        'priority': 1,
-    },
-    {
-        'name': 'Bisnow Data Center',
-        'base_url': 'https://www.bisnow.com',
-        'article_links': ['https://www.bisnow.com/national/data-center'],
-        'article_selector': 'a[href*="/news/"]',
-        'priority': 1,
-    },
-    {
         'name': 'Baxtel News',
         'base_url': 'https://baxtel.com',
         'article_links': ['https://baxtel.com/news'],
@@ -140,9 +126,11 @@ class WebScraper(BaseScraper):
                     time.sleep(2 ** attempt)
         return None
     
-    def is_relevant(self, title: str, content: str) -> bool:
+    def is_relevant(self, title: str, content: str, threshold: float = 0.2) -> bool:
         """Check if article is relevant to data centers"""
         text = f"{title} {content}".lower()
+        if threshold <= 0:
+            return True
         return any(keyword in text for keyword in DC_KEYWORDS)
     
     def extract_text(self, soup: BeautifulSoup) -> str:

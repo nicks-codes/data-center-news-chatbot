@@ -20,6 +20,10 @@ services:
         value: groq
       - key: EMBEDDING_PROVIDER
         value: sentence-transformers
+      - key: CHROMA_PERSIST_DIR
+        value: /data/chroma
+      - key: CHROMA_DB_PATH
+        value: /data/chroma
     disk:
       name: data
       mountPath: /data

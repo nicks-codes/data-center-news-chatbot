@@ -14,7 +14,8 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=sqlite:////data/datacenter_news.db
-      - CHROMA_DB_PATH=/data/chroma_db
+      - CHROMA_PERSIST_DIR=/data/chroma
+      - CHROMA_DB_PATH=/data/chroma
       - AI_PROVIDER=${AI_PROVIDER:-groq}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-sentence-transformers}
       - GROQ_API_KEY=${GROQ_API_KEY}
