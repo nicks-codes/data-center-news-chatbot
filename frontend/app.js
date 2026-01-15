@@ -20,6 +20,9 @@ const refreshBtn = document.getElementById('refresh-btn');
 const scrapeBtn = document.getElementById('scrape-btn');
 const sampleBtns = document.querySelectorAll('.sample-btn');
 const helperChips = document.querySelectorAll('.helper-chip');
+const navTabs = document.querySelectorAll('.nav-tab');
+const chatView = document.getElementById('chat-view');
+const newsView = document.getElementById('news-view');
 
 // State
 let isLoading = false;
@@ -133,6 +136,34 @@ function setupEventListeners() {
             if (!id || id === conversationId) return;
             loadConversation(id);
         });
+    }
+
+    navTabs.forEach((tab) => {
+        tab.addEventListener('click', () => {
+            const view = tab.getAttribute('data-view');
+            switchView(view);
+        });
+    });
+}
+
+function switchView(view) {
+    if (view === 'news') {
+        chatView.classList.remove('active');
+        newsView.classList.add('active');
+    } else {
+        chatView.classList.add('active');
+        newsView.classList.remove('active');
+    }
+    navTabs.forEach((tab) => {
+        const tabView = tab.getAttribute('data-view');
+        if (tabView === view) {
+            tab.classList.add('active');
+        } else {
+            tab.classList.remove('active');
+        }
+    });
+    if (view === 'news') {
+        window.dispatchEvent(new Event('news:activate'));
     }
 }
 

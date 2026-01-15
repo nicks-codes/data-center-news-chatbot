@@ -79,3 +79,36 @@ class Feedback(Base):
     rating = Column(String(10), nullable=False)  # up / down
     tag = Column(String(50), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+
+class Digest(Base):
+    """Daily news digest for a given audience."""
+    __tablename__ = "digests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD
+    audience = Column(String(30), nullable=False, index=True, default="DC_RE")
+    title = Column(String(200), nullable=False)
+    content_md = Column(Text, nullable=False)
+    sources_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_digests_date", "date"),
+    )
+
+
+class StorySummary(Base):
+    """Cached AI summary + key facts for an article."""
+    __tablename__ = "story_summaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    article_id = Column(Integer, ForeignKey("articles.id"), nullable=False, index=True)
+    summary_md = Column(Text, nullable=False)
+    key_facts_json = Column(Text, nullable=True)
+    model = Column(String(100), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_story_summaries_article", "article_id"),
+    )

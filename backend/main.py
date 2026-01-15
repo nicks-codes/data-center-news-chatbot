@@ -13,10 +13,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from .services.chat_service import ChatService
+from .services.news_digest_service import NewsDigestService
 from .scheduler import ScrapingScheduler
 from .services.text_chunker import chunk_text
 from .database.db import SessionLocal
 from .database.models import Article, Conversation, Message, Feedback
+from .scrapers.dcrundown_scraper import DCRundownScraper
 from .scrapers.newsletter_scraper import NewsletterScraper
 import json
 from uuid import uuid4
@@ -88,6 +90,7 @@ app.add_middleware(
 
 # Initialize chat service
 chat_service = ChatService()
+news_digest_service = NewsDigestService(chat_service)
 
 # Mount static files - check multiple locations
 frontend_paths = [
@@ -152,6 +155,10 @@ class FeedbackRequest(BaseModel):
 
 class RenameConversationRequest(BaseModel):
     title: str
+
+
+class IngestNewsletterUrlRequest(BaseModel):
+    url: str
 
 class SummaryResponse(BaseModel):
     article_id: int
@@ -498,6 +505,20 @@ async def upload_newsletter(request: NewsletterUploadRequest):
         )
     finally:
         db.close()
+
+
+@app.post("/api/newsletter/ingest_url")
+async def ingest_newsletter_url(request: IngestNewsletterUrlRequest):
+    url = (request.url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    scraper = DCRundownScraper()
+    try:
+        result = scraper.ingest_issue(url)
+        return result
+    except Exception as e:
+        logger.error(f"Error ingesting newsletter URL: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stats")
 async def get_stats():
@@ -858,6 +879,57 @@ async def digest(request: DigestRequest):
         return DigestResponse(**result)
     except Exception as e:
         logger.error(f"Error generating digest: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/news/digest")
+async def get_news_digest(date: Optional[str] = None, audience: str = "DC_RE", days: int = 1):
+    """Get or generate a daily digest for a given date and audience."""
+    try:
+        result = news_digest_service.get_or_create_digest(
+            date_str=date,
+            audience=audience,
+            window_days=days,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error generating news digest: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/news/stories")
+async def get_news_stories(
+    days: int = 1,
+    limit: int = 30,
+    market: Optional[str] = None,
+    topic: Optional[str] = None,
+):
+    """List recent stories with cached summaries when available."""
+    try:
+        stories = news_digest_service.list_stories(
+            days=days,
+            limit=limit,
+            market=market,
+            topic=topic,
+        )
+        return {"stories": stories}
+    except Exception as e:
+        logger.error(f"Error fetching news stories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/news/stories/{article_id}/summarize")
+async def summarize_news_story(article_id: int, force: bool = False):
+    """Generate and cache a per-story summary for DC real estate."""
+    try:
+        result = news_digest_service.summarize_story(article_id=article_id, force=force)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error summarizing story: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

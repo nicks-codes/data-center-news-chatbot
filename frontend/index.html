@@ -68,74 +68,138 @@
         
         <!-- Main Chat Area -->
         <main class="chat-container">
-            <div class="chat-header">
-                <div class="chat-header-top">
-                    <div class="chat-header-title">
-                        <h2>Data Center News Chatbot</h2>
-                        <p>Ask questions about the latest data center industry news and trends</p>
+            <div class="top-nav">
+                <button class="nav-tab active" data-view="chat">Chat</button>
+                <button class="nav-tab" data-view="news">News</button>
+            </div>
+
+            <div id="chat-view" class="view active">
+                <div class="chat-header">
+                    <div class="chat-header-top">
+                        <div class="chat-header-title">
+                            <h2>Data Center News Chatbot</h2>
+                            <p>Ask questions about the latest data center industry news and trends</p>
+                        </div>
+                        <div class="chat-header-actions">
+                            <label class="audience-label" for="audience-select">Audience</label>
+                            <select id="audience-select" class="audience-select">
+                                <option value="Exec">Exec</option>
+                                <option value="Investor">Investor</option>
+                                <option value="Architect">Architect</option>
+                                <option value="Operator">Operator</option>
+                                <option value="Engineer">Engineer</option>
+                                <option value="Sustainability">Sustainability</option>
+                                <option value="Vendor">Vendor</option>
+                            </select>
+                            <button id="new-chat-btn" class="new-chat-btn" type="button">New chat</button>
+                        </div>
                     </div>
-                    <div class="chat-header-actions">
-                        <label class="audience-label" for="audience-select">Audience</label>
-                        <select id="audience-select" class="audience-select">
-                            <option value="Exec">Exec</option>
-                            <option value="Investor">Investor</option>
-                            <option value="Architect">Architect</option>
-                            <option value="Operator">Operator</option>
-                            <option value="Engineer">Engineer</option>
-                            <option value="Sustainability">Sustainability</option>
-                            <option value="Vendor">Vendor</option>
+                </div>
+                
+                <div class="chat-messages" id="chat-messages">
+                    <div class="welcome-message">
+                        <div class="welcome-icon">🏢</div>
+                        <h3>Welcome to the Data Center News Chatbot!</h3>
+                        <p>I can answer questions about:</p>
+                        <ul>
+                            <li>📰 Latest data center news and developments</li>
+                            <li>🏗️ Construction and expansion projects</li>
+                            <li>💼 M&A activity and market trends</li>
+                            <li>🌱 Sustainability initiatives</li>
+                            <li>⚡ Technology innovations (cooling, power, AI)</li>
+                        </ul>
+                        <p class="welcome-tip">Try one of the sample questions or ask your own!</p>
+                    </div>
+                </div>
+                
+                <div class="chat-input-container">
+                    <div class="input-helper">
+                        <span class="helper-label">Audience</span>
+                        <span class="helper-pill" id="audience-pill">Exec</span>
+                        <span class="helper-label">Time window</span>
+                        <button type="button" class="helper-chip" data-insert="last 7 days">Last 7 days</button>
+                        <button type="button" class="helper-chip" data-insert="last 30 days">Last 30 days</button>
+                        <span class="helper-note">Shift+Enter for newline</span>
+                    </div>
+                    <form id="chat-form">
+                        <textarea 
+                            id="chat-input"
+                            rows="1"
+                            placeholder="Ask about data center news..."
+                            autocomplete="off"
+                        ></textarea>
+                        <div class="chat-actions">
+                            <button type="button" id="stop-btn" class="stop-btn" hidden>Stop generating</button>
+                            <button type="submit" id="send-btn">
+                                <span>Send</span>
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div id="news-view" class="view">
+                <div class="news-header">
+                    <div class="news-title">
+                        <h2>Data Center Real Estate News</h2>
+                        <p>Daily digest and top stories for data center real estate.</p>
+                    </div>
+                    <div class="news-filters">
+                        <label class="audience-label" for="news-window">Time window</label>
+                        <select id="news-window" class="audience-select">
+                            <option value="1">Today</option>
+                            <option value="7">7d</option>
+                            <option value="30">30d</option>
                         </select>
-                        <button id="new-chat-btn" class="new-chat-btn" type="button">New chat</button>
+                        <label class="audience-label" for="news-market">Market</label>
+                        <select id="news-market" class="audience-select">
+                            <option value="">All</option>
+                            <option value="dfw">DFW</option>
+                            <option value="nova">NoVA</option>
+                            <option value="phoenix">Phoenix</option>
+                            <option value="atlanta">Atlanta</option>
+                            <option value="chicago">Chicago</option>
+                            <option value="ohio">Ohio</option>
+                        </select>
+                        <label class="audience-label" for="news-topic">Topic</label>
+                        <select id="news-topic" class="audience-select">
+                            <option value="">All</option>
+                            <option value="power">Power</option>
+                            <option value="cooling">Cooling</option>
+                            <option value="permitting">Permitting</option>
+                            <option value="land">Land</option>
+                            <option value="colocation">Colocation</option>
+                            <option value="hyperscale">Hyperscale</option>
+                        </select>
                     </div>
                 </div>
-            </div>
-            
-            <div class="chat-messages" id="chat-messages">
-                <div class="welcome-message">
-                    <div class="welcome-icon">🏢</div>
-                    <h3>Welcome to the Data Center News Chatbot!</h3>
-                    <p>I can answer questions about:</p>
-                    <ul>
-                        <li>📰 Latest data center news and developments</li>
-                        <li>🏗️ Construction and expansion projects</li>
-                        <li>💼 M&A activity and market trends</li>
-                        <li>🌱 Sustainability initiatives</li>
-                        <li>⚡ Technology innovations (cooling, power, AI)</li>
-                    </ul>
-                    <p class="welcome-tip">Try one of the sample questions or ask your own!</p>
+
+                <div class="news-grid">
+                    <section class="digest-card">
+                        <div class="digest-card-header">
+                            <h3>Today’s Digest</h3>
+                            <span class="digest-meta" id="digest-meta"></span>
+                        </div>
+                        <div id="digest-content" class="digest-content"></div>
+                        <div id="digest-sources" class="digest-sources"></div>
+                    </section>
+
+                    <section class="stories-panel">
+                        <div class="stories-header">
+                            <h3>Top Stories</h3>
+                            <button type="button" id="summaries-btn" class="action-btn">Generate all summaries</button>
+                        </div>
+                        <div id="stories-list" class="stories-list"></div>
+                    </section>
                 </div>
-            </div>
-            
-            <div class="chat-input-container">
-                <div class="input-helper">
-                    <span class="helper-label">Audience</span>
-                    <span class="helper-pill" id="audience-pill">Exec</span>
-                    <span class="helper-label">Time window</span>
-                    <button type="button" class="helper-chip" data-insert="last 7 days">Last 7 days</button>
-                    <button type="button" class="helper-chip" data-insert="last 30 days">Last 30 days</button>
-                    <span class="helper-note">Shift+Enter for newline</span>
-                </div>
-                <form id="chat-form">
-                    <textarea 
-                        id="chat-input"
-                        rows="1"
-                        placeholder="Ask about data center news..."
-                        autocomplete="off"
-                    ></textarea>
-                    <div class="chat-actions">
-                        <button type="button" id="stop-btn" class="stop-btn" hidden>Stop generating</button>
-                        <button type="submit" id="send-btn">
-                            <span>Send</span>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
-                            </svg>
-                        </button>
-                    </div>
-                </form>
             </div>
         </main>
     </div>
     
     <script src="app.js"></script>
+    <script src="news.js"></script>
 </body>
 </html>
