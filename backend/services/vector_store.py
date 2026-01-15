@@ -16,7 +16,7 @@ try:
     CHROMADB_AVAILABLE = True
 except ImportError:
     CHROMADB_AVAILABLE = False
-    logger.warning("ChromaDB not installed. Vector search will be disabled. Install with: pip install chromadb")
+    logger.info("ChromaDB not installed. Vector search disabled (optional). Install with: pip install chromadb")
 
 class VectorStore:
     """Service for managing vector embeddings in ChromaDB"""
@@ -25,7 +25,7 @@ class VectorStore:
         if not CHROMADB_AVAILABLE:
             self.client = None
             self.collection = None
-            logger.warning("VectorStore initialized but ChromaDB is not available")
+            logger.info("VectorStore initialized without ChromaDB (keyword search only)")
             return
             
         # Initialize ChromaDB (prefer persistent disk when available)
@@ -41,7 +41,7 @@ class VectorStore:
     def add_article(self, article_id: str, embedding: List[float], metadata: Dict, document: Optional[str] = None) -> bool:
         """Add an article embedding to the vector store"""
         if not CHROMADB_AVAILABLE or not self.collection:
-            logger.warning("ChromaDB not available, cannot add article")
+            logger.debug("ChromaDB not available, cannot add article")
             return False
         try:
             # Use upsert when available to make indexing idempotent
@@ -70,7 +70,7 @@ class VectorStore:
     ) -> bool:
         """Add multiple articles to the vector store"""
         if not CHROMADB_AVAILABLE or not self.collection:
-            logger.warning("ChromaDB not available, cannot add articles")
+            logger.debug("ChromaDB not available, cannot add articles")
             return False
         try:
             upsert = getattr(self.collection, "upsert", None)
@@ -92,7 +92,7 @@ class VectorStore:
     def search_similar(self, query_embedding: List[float], n_results: int = 5) -> List[Dict]:
         """Search for similar articles using semantic search"""
         if not CHROMADB_AVAILABLE or not self.collection:
-            logger.warning("ChromaDB not available, cannot search")
+            logger.debug("ChromaDB not available, cannot search")
             return []
         try:
             try:

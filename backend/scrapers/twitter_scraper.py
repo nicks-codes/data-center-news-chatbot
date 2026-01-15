@@ -51,7 +51,7 @@ class TwitterScraper(BaseScraper):
                 self.api_v2 = False
                 self.logger.info("Twitter API v1.1 initialized successfully")
             else:
-                self.logger.warning("Twitter credentials not found. Twitter scraping will be disabled.")
+                self.logger.info("Twitter credentials not found. Twitter scraping disabled (optional).")
         except Exception as e:
             self.logger.error(f"Error initializing Twitter API: {e}")
     
@@ -130,7 +130,7 @@ class TwitterScraper(BaseScraper):
         all_articles = []
         
         if not self.api:
-            self.logger.warning("Twitter scraper not available - credentials missing")
+            self.logger.info("Twitter scraper disabled (credentials missing)")
             return all_articles
         
         for search_term in SEARCH_TERMS:
