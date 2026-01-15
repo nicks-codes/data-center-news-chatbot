@@ -14,6 +14,7 @@ kill_timeout = "5s"
   AI_PROVIDER = "groq"
   EMBEDDING_PROVIDER = "openai"
   DATABASE_URL = "sqlite:////data/datacenter_news.db"
+  CHROMA_PERSIST_DIR = "/data/chroma_db"
   CHROMA_DB_PATH = "/data/chroma_db"
 
 [http_service]

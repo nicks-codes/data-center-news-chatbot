@@ -1,5 +1,5 @@
-# Lightweight Dockerfile for Data Center News Chatbot
-# Optimized for Railway/Render free tier (< 4GB image size)
+# Production Dockerfile for Data Center News Chatbot
+# Uses full dependencies for semantic retrieval
 # v2 - Fixed PORT handling
 
 FROM python:3.11-slim
@@ -19,8 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create app directory
 WORKDIR /app
 
-# Copy and install lightweight requirements (includes chromadb + openai)
-COPY backend/requirements-light.txt ./requirements.txt
+# Copy and install full requirements (semantic retrieval enabled)
+COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
@@ -30,10 +30,11 @@ COPY frontend/ ./frontend/
 # Create necessary directories (prefer /data for persistence)
 RUN mkdir -p /data /data/chroma_db
 
-# Set environment defaults (semantic retrieval via chroma + OpenAI embeddings when OPENAI_API_KEY is set)
+# Set environment defaults (semantic retrieval via Chroma + local embeddings)
 ENV DATABASE_URL=sqlite:////data/datacenter_news.db \
+    CHROMA_PERSIST_DIR=/data/chroma_db \
     CHROMA_DB_PATH=/data/chroma_db \
-    EMBEDDING_PROVIDER=openai \
+    EMBEDDING_PROVIDER=sentence-transformers \
     AI_PROVIDER=groq
 
 # Copy and setup start script

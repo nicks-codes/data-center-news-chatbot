@@ -11,7 +11,9 @@ This guide covers deploying the Data Center News Chatbot to various cloud platfo
 2. Connect your GitHub repository
 3. Add environment variables in the dashboard:
    - `GROQ_API_KEY` - Get free at [console.groq.com](https://console.groq.com)
-4. Deploy!
+   - `CHROMA_PERSIST_DIR=/data/chroma_db`
+4. Add a persistent volume mounted at `/data` (Railway Volumes)
+5. Deploy!
 
 ### Option 2: Render
 1. Go to [Render Dashboard](https://dashboard.render.com)
@@ -43,7 +45,8 @@ docker build -t datacenter-news-chatbot .
 docker run -d \
   -p 8000:8000 \
   -e GROQ_API_KEY=your_key_here \
-  -v datacenter_data:/app/data \
+  -e CHROMA_PERSIST_DIR=/data/chroma_db \
+  -v datacenter_data:/data \
   datacenter-news-chatbot
 ```
 
@@ -55,6 +58,8 @@ docker run -d \
 | `AI_PROVIDER` | No | `groq` (default), `together`, or `openai` |
 | `EMBEDDING_PROVIDER` | No | `sentence-transformers` (default, free) or `openai` |
 | `DATABASE_URL` | No | SQLite default, or PostgreSQL URL |
+| `CHROMA_PERSIST_DIR` | No | Persistent ChromaDB path (e.g. `/data/chroma_db`) |
+| `LOG_LEVEL` | No | Log level: `INFO` (prod), `DEBUG` (dev) |
 
 *Or use `TOGETHER_API_KEY` or `OPENAI_API_KEY` instead
 
