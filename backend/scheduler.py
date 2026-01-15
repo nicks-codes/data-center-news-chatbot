@@ -311,13 +311,17 @@ class ScrapingScheduler:
                     logger.info("Embedding backfill skipped (vector store unavailable).")
                     return
 
-                # Only backfill a bounded amount per startup to avoid runaway costs.
-                max_to_embed = int(os.getenv("STARTUP_EMBED_BACKFILL_LIMIT", "200") or "200")
+                # Backfill missing embeddings on startup (cap with STARTUP_EMBED_BACKFILL_LIMIT if set).
+                raw_limit = os.getenv("STARTUP_EMBED_BACKFILL_LIMIT", "0") or "0"
+                try:
+                    max_to_embed = int(raw_limit)
+                except Exception:
+                    max_to_embed = 0
                 batch_size = int(os.getenv("STARTUP_EMBED_BACKFILL_BATCH", "25") or "25")
-                max_to_embed = max(0, min(max_to_embed, 2000))
                 batch_size = max(5, min(batch_size, 100))
-                if max_to_embed == 0:
-                    return
+                limit_enabled = max_to_embed > 0
+                if limit_enabled:
+                    max_to_embed = min(max_to_embed, 10000)
 
                 db = SessionLocal()
                 try:
@@ -326,11 +330,16 @@ class ScrapingScheduler:
                     if remaining == 0:
                         logger.info("Embedding backfill: no missing embeddings.")
                         return
-                    logger.info(f"Embedding backfill: {remaining} articles missing embeddings (embedding up to {max_to_embed}).")
+                    if limit_enabled:
+                        logger.info(f"Embedding backfill: {remaining} articles missing embeddings (embedding up to {max_to_embed}).")
+                    else:
+                        logger.info(f"Embedding backfill: {remaining} articles missing embeddings (no cap).")
 
                     offset = 0
                     embedded_articles = 0
-                    while embedded_articles < max_to_embed:
+                    while True:
+                        if limit_enabled and embedded_articles >= max_to_embed:
+                            break
                         batch = q.offset(offset).limit(batch_size).all()
                         if not batch:
                             break

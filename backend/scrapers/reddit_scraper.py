@@ -83,7 +83,7 @@ class RedditScraper(BaseScraper):
                 )
                 self.logger.info("Reddit API initialized successfully")
             else:
-                self.logger.warning("Reddit credentials not found. Reddit scraping will be disabled.")
+                self.logger.info("Reddit credentials not found. Reddit scraping disabled (optional).")
         except Exception as e:
             self.logger.error(f"Error initializing Reddit API: {e}")
     

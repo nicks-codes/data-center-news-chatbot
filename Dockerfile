@@ -19,8 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create app directory
 WORKDIR /app
 
-# Copy and install lightweight requirements (includes chromadb + openai)
-COPY backend/requirements-light.txt ./requirements.txt
+# Copy and install production requirements (includes chromadb + embeddings)
+COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
@@ -28,12 +28,13 @@ COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 
 # Create necessary directories (prefer /data for persistence)
-RUN mkdir -p /data /data/chroma_db
+RUN mkdir -p /data /data/chroma /data/chroma_db
 
-# Set environment defaults (semantic retrieval via chroma + OpenAI embeddings when OPENAI_API_KEY is set)
+# Set environment defaults (semantic retrieval via chroma + local embeddings)
 ENV DATABASE_URL=sqlite:////data/datacenter_news.db \
-    CHROMA_DB_PATH=/data/chroma_db \
-    EMBEDDING_PROVIDER=openai \
+    CHROMA_PERSIST_DIR=/data/chroma \
+    CHROMA_DB_PATH=/data/chroma \
+    EMBEDDING_PROVIDER=sentence-transformers \
     AI_PROVIDER=groq
 
 # Copy and setup start script
